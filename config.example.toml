@@ -1,0 +1,26 @@
+# dtc config template — copy to ~/.config/dtc/config.toml on each machine
+# and fill in real values. NEVER commit the real file: hub addresses and
+# tokens are tailnet-private details.
+
+# where the hub listens (Tailscale IP of the k8s node running it)
+hub_url = "http://<hub-host>:7331"
+
+# bearer token, shared by all machines. Read from "token" next to this
+# file by default (chmod 600), or from $DTC_TOKEN.
+# token_file = "token"
+
+# agent hostname reported to the hub (defaults to `hostname`)
+# hostname = "cn1"
+
+# How to reach each fleet host for attach/preview/mutations.
+# Keys must match the hostname the agent reports.
+# An empty ssh = "" means "this machine — run tmux locally".
+
+[hosts.example-server]
+ssh = ""
+
+[hosts.other-machine]
+ssh = "alias-in-ssh-config"
+
+[hosts.laptop]
+ssh = "nils@100.x.y.z"

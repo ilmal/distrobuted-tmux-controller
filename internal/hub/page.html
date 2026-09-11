@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>dtc · tmux fleet</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#111318; color:#d7dae0; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+         margin:0; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:#7a8190; margin-bottom:20px; }
+  .host { background:#171a21; border:1px solid #232833; border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 8px; }
+  h2 small { color:#7a8190; font-weight:normal; }
+  table { border-collapse:collapse; width:100%; }
+  th { text-align:left; color:#7a8190; font-weight:normal; font-size:12px; padding:2px 8px 6px 0; }
+  td { padding:3px 8px 3px 0; vertical-align:top; white-space:nowrap; }
+  td.name { font-weight:600; }
+  td.prev { white-space:normal; color:#8b93a3; max-width:520px; overflow:hidden; text-overflow:ellipsis; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
+  .stale { background:#555 !important; }
+  .attd { color:#87d787; }
+  footer { color:#5b6270; margin-top:24px; font-size:12px; }
+</style>
+</head>
+<body>
+<h1>🧭 dtc — tmux fleet</h1>
+<div class="sub">{{.Total}} sessions · {{.Attached}} attached · {{len .Hosts}} hosts · refreshed {{.Now}}</div>
+{{range .Hosts}}
+<div class="host">
+  <h2><span class="dot{{if .Stale}} stale{{end}}" style="background:#87d787"></span> {{.Name}}
+      <small>· tmux {{.TmuxVersion}} · seen {{.Seen}} ago{{if .Stale}} · STALE{{end}}</small></h2>
+  {{if .Sessions}}
+  <table>
+    <tr><th></th><th>session</th><th>win</th><th>att</th><th>act</th><th>tag</th><th>preview</th></tr>
+    {{range .Sessions}}
+    <tr>
+      <td><span class="dot" style="background:{{.Dot}}"></span></td>
+      <td class="name">{{.Name}}</td>
+      <td>{{.Windows}}</td>
+      <td>{{if .Attached}}<span class="attd">✓</span>{{else}}–{{end}}</td>
+      <td>{{.Act}}</td>
+      <td>{{.Tag}}</td>
+      <td class="prev">{{.Prev}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="sub">no sessions</div>{{end}}
+</div>
+{{end}}
+<footer>dtc hub · auto-refresh 15s</footer>
+</body>
+</html>

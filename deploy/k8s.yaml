@@ -1,0 +1,64 @@
+# dtc hub — central tmux fleet registry.
+# Applied on cn1. The token is applied separately (NOT stored in this repo):
+#   kubectl -n dtc create secret generic dtc-token --from-file=token=<path>
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dtc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dtc-hub
+  namespace: dtc
+  labels:
+    app: dtc-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dtc-hub
+  template:
+    metadata:
+      labels:
+        app: dtc-hub
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: cn1
+      containers:
+        - name: hub
+          image: localhost:5000/dtc-hub:latest
+          imagePullPolicy: IfNotPresent
+          args: ["hub", "--addr", "0.0.0.0:7331", "--data", "/data/state.json", "--token-file", "/etc/dtc/token"]
+          ports:
+            - containerPort: 7331
+              hostPort: 7331
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: token
+              mountPath: /etc/dtc
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 7331
+            initialDelaySeconds: 3
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/k8s/dtc
+            type: DirectoryOrCreate
+        - name: token
+          secret:
+            secretName: dtc-token

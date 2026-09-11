@@ -1,0 +1,14 @@
+# machine-local config — never commit (contains hub IP + token)
+config.toml
+token
+*.token
+.env
+
+# build artifacts
+/dtc
+/dtc-hub
+dist/
+
+# runtime state
+state.json
+*.log
