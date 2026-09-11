@@ -60,13 +60,18 @@ applied out-of-band: `kubectl -n dtc create secret generic dtc-token --from-file
 | | |
 |---|---|
 | `enter` | attach (local tmux, or ssh + `tmux new-session -A`) |
-| `p` | live pane preview (3000 lines, scrollable) |
+| `p` | live pane preview (3000 lines, scrollable, session-colored border) |
 | `c` / `t` / `r` | set color / tag / rename (applies on the owning host) |
 | `n` / `K` | new session on any host / kill (with confirm) |
-| `/`, `s`, `S` | filter, cycle sort (color→host→name→activity), reverse |
+| `1`–`5` | sort: `1` color · `2` host (grouped, local first) · `3` activity · `4` created · `5` name |
+| `s`, `S` | cycle sort, reverse |
+| `/` | filter by name/host/tag (`esc` clears) |
 | `R`, `?`, `q` | refresh, help, quit |
 
-CLI: `dtc ls [--sort color|host|name|activity]`, `dtc attach NAME`,
+Host and color sorts render grouped section headers with per-group counts;
+activity freshness is color-coded (green < 5 min, amber < 1 h, dim older).
+
+CLI: `dtc ls [--sort color|host|activity|created|name]`, `dtc attach NAME`,
 `dtc new NAME --host H`, `dtc kill NAME`, `dtc color NAME <color|auto>`.
 
 ## Colors and Ghostty tabs

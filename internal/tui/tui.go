@@ -36,10 +36,10 @@ type Model struct {
 	rows []row
 	cur  int
 
-	sort       int // 0 color, 1 host, 2 name, 3 activity
-	desc       bool
-	filter     string
-	totalShown int
+	sort     int // 0 color, 1 host, 2 activity, 3 created, 4 name
+	desc     bool
+	filter   string
+	totalAll int
 
 	view  int // 0 list, 1 preview, 2 help
 	vp    viewport.Model
@@ -92,14 +92,45 @@ type actionMsg struct {
 // ---- styles ----
 
 var (
-	sBar      = lipgloss.NewStyle().Foreground(lipgloss.Color("253")).Bold(true)
-	sDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	sErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	sOK       = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
-	sSel      = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	sHead     = lipgloss.NewStyle().Foreground(lipgloss.Color("60")).Bold(true)
+	accent = lipgloss.Color("62")
+	selBg  = lipgloss.Color("236")
+
+	sTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(accent).Bold(true).Padding(0, 1)
+	sBar   = lipgloss.NewStyle().Foreground(lipgloss.Color("253")).Bold(true)
+	sDim   = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	sErr   = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	sOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	sHead  = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	sRule  = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	sGroup = lipgloss.NewStyle().Foreground(lipgloss.Color("110")).Bold(true)
+
 	sAttached = lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true)
+	sFresh    = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	sWarm     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	sCool     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	sChipKey = lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("249")).Bold(true).Padding(0, 1)
 )
+
+func actStyle(d time.Duration) lipgloss.Style {
+	switch {
+	case d < 5*time.Minute:
+		return sFresh
+	case d < time.Hour:
+		return sWarm
+	case d < 24*time.Hour:
+		return sCool
+	}
+	return sDim
+}
+
+// list column widths (sessions table)
+const colName, colHost, colWin, colAtt, colAct, colTag = 26, 14, 3, 4, 5, 12
+
+func keycap(k, label string) string {
+	kc := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("249")).Bold(true).Render(" " + k + " ")
+	return kc + sDim.Render(" " + label + " ")
+}
 
 // ---- construction ----
 
@@ -155,8 +186,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.vp.Width = msg.Width
-		m.vp.Height = msg.Height - 6
+		m.vp.Width = max(20, msg.Width-4)
+		m.vp.Height = max(5, msg.Height-6)
 		return m, nil
 
 	case tickMsg:
@@ -206,9 +237,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionMsg:
 		if msg.err != nil {
 			m.setErr(msg.err.Error())
-		} else if msg.note != "" {
-			m.status = msg.note
-			m.statusAt = time.Now()
+		} else {
+			m.err = ""
+			if msg.note != "" {
+				m.status = msg.note
+				m.statusAt = time.Now()
+			}
 		}
 		return m, fetchCmd(m.cfg)
 	}
@@ -472,10 +506,13 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Focus()
 		return m, textinput.Blink
 	case "s":
-		m.sort = (m.sort + 1) % 4
+		m.sort = (m.sort + 1) % 5
 		m.cur = 0
 	case "S":
 		m.desc = !m.desc
+	case "1", "2", "3", "4", "5":
+		m.sort = int(key.String()[0] - '1')
+		m.cur = 0
 	case "R":
 		return m, fetchCmd(m.cfg)
 	case "?":
@@ -698,6 +735,7 @@ func (m *Model) loadFleet(fr *model.FleetResponse) {
 		}
 	}
 	m.rows = rows
+	m.totalAll = len(rows)
 	m.applyFilterSort()
 	m.restoreCursor(prevKey)
 }
@@ -713,7 +751,6 @@ func (m *Model) applyFilterSort() {
 			rows = append(rows, r)
 		}
 	}
-	m.totalShown = len(rows)
 	less := m.less()
 	if m.desc {
 		sort.SliceStable(rows, func(i, j int) bool { return less(rows[j], rows[i]) })
@@ -726,17 +763,28 @@ func (m *Model) applyFilterSort() {
 func (m Model) less() func(a, b row) bool {
 	byName := func(a, b row) bool { return a.Name < b.Name }
 	switch m.sort {
-	case 1:
+	case 1: // host — local machine first, then alphabetical
+		rank := func(h string) int {
+			if m.cfg.IsLocal(h) {
+				return 0
+			}
+			return 1
+		}
 		return func(a, b row) bool {
+			if ra, rb := rank(a.Host), rank(b.Host); ra != rb {
+				return ra < rb
+			}
 			if a.Host != b.Host {
 				return a.Host < b.Host
 			}
 			return byName(a, b)
 		}
-	case 2:
-		return byName
-	case 3:
+	case 2: // most recently active first
 		return func(a, b row) bool { return a.Activity > b.Activity }
+	case 3: // newest first
+		return func(a, b row) bool { return a.Created > b.Created }
+	case 4:
+		return byName
 	default: // color groups in palette order
 		return func(a, b row) bool {
 			if a.def.Name != b.def.Name {
@@ -829,108 +877,233 @@ func max(a, b int) int {
 }
 
 func (m Model) sortLabel() string {
-	names := []string{"color", "host", "name", "activity"}
+	names := []string{"color", "host", "activity", "created", "name"}
 	label := names[m.sort]
-	if m.desc {
-		label += " ↓"
+	// natural direction: activity/created are newest-first (↓), the rest ascending
+	natural := map[int]bool{2: true, 3: true}
+	arrow := "↑"
+	if natural[m.sort] != m.desc {
+		arrow = "↓"
 	}
-	return label
+	return label + " " + arrow
 }
 
 func (m Model) viewList() string {
 	var b strings.Builder
 
-	hub := sOK.Render("hub ok")
+	// ---- header: title chip + hub state + stats ----
+	hub := sOK.Render("● hub ok")
 	if !m.hubOK {
-		hub = sErr.Render("HUB UNREACHABLE — local only")
+		hub = sErr.Render("● hub unreachable — local only")
 	}
 	age := ""
 	if !m.fetched.IsZero() {
-		age = " · refreshed " + rel(time.Since(m.fetched)) + " ago"
+		if d := time.Since(m.fetched); d < time.Minute {
+			age = sDim.Render("  refreshed just now")
+		} else {
+			age = sDim.Render("  refreshed " + rel(d) + " ago")
+		}
 	}
 	attached := 0
+	hostsFresh := map[string]bool{}
 	for _, r := range m.rows {
 		if r.Attached {
 			attached++
 		}
+		if !r.stale {
+			hostsFresh[r.Host] = true
+		}
 	}
-	b.WriteString(sBar.Render("🧭 dtc — tmux fleet") + sDim.Render("  "+hub+age) + "\n")
-	b.WriteString(sDim.Render(fmt.Sprintf("%d sessions (%d shown) · %d attached · sort: %s", len(m.rows), m.totalShown, attached, m.sortLabel())))
+	b.WriteString(sTitle.Render("🧭 dtc") + sDim.Render(" distributed tmux controller  ") + hub + age + "\n")
+
+	ctx := sDim.Render("sort ") + sHead.Render(m.sortLabel()) +
+		sDim.Render(fmt.Sprintf("  ·  %d sessions", m.totalAll))
+	if attached > 0 {
+		ctx += sDim.Render("  ·  ") + sAttached.Render(fmt.Sprintf("%d attached", attached))
+	}
+	if len(hostsFresh) > 0 {
+		ctx += sDim.Render(fmt.Sprintf("  ·  %d/%d hosts up", len(hostsFresh), m.hostCount()))
+	}
 	if m.filter != "" {
-		b.WriteString(sOK.Render(" · filter: " + m.filter))
+		ctx += sDim.Render("  ·  filter ") + sOK.Render("/"+m.filter+"/")
 	}
-	b.WriteString("\n\n")
+	b.WriteString(ctx + "\n")
+	b.WriteString(sRule.Render(strings.Repeat("─", max(20, m.width-1))) + "\n")
 
-	const colDot, colName, colHost, colWin, colAtt, colAct, colTag = 2, 24, 12, 4, 4, 5, 12
-	used := colDot + colName + colHost + colWin + colAtt + colAct + colTag
-	prevW := m.width - used - 1
+	// ---- column header ----
+	used := 1 + colName + colHost + colWin + colAtt + colAct + colTag + 1
+	prevW := max(0, m.width-used)
+	b.WriteString(sHead.Render(" " + pad("", 1) + pad("SESSION", colName) + pad("HOST", colHost) +
+		pad("W", colWin) + pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW") + "\n")
 
-	header := sHead.Render(pad("●", colDot) + pad("SESSION", colName) + pad("HOST", colHost) +
-		pad("W", colWin) + pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW")
-	b.WriteString(header + "\n")
+	// ---- group headers (host / color sort) ----
+	var groupOf func(row) string
+	var groupHead func(key string, n, fresh int) string
+	switch m.sort {
+	case 1:
+		groupOf = func(r row) string { return r.Host }
+		groupHead = func(key string, n, fresh int) string {
+			dot := sDim.Render("○")
+			if fresh > 0 {
+				dot = sOK.Render("●")
+			}
+			name := key
+			if m.cfg.IsLocal(key) {
+				name += " (you)"
+			}
+			return sGroup.Render(pad("  "+dot+" ▣ "+name, 28)) +
+				sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
+		}
+	case 0:
+		groupOf = func(r row) string { return r.def.Name }
+		groupHead = func(key string, n, _ int) string {
+			d := colors.For("", key)
+			dot := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(d.ANSI))).Render("●")
+			return sGroup.Render(pad("  "+dot+" "+key, 28)) +
+				sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
+		}
+	}
+	groups := map[string][2]int{}
+	if groupOf != nil {
+		for _, r := range m.rows {
+			g := groups[groupOf(r)]
+			g[0]++
+			if !r.stale {
+				g[1]++
+			}
+			groups[groupOf(r)] = g
+		}
+	}
 
-	visible := m.height - 8
+	// ---- build display lines (rows + group headers), then window ----
+	lines := make([]string, 0, len(m.rows)+8)
+	selLine := 0
+	prevGroup := "\x00"
+	for i, r := range m.rows {
+		if groupOf != nil {
+			gk := groupOf(r)
+			if gk != prevGroup {
+				g := groups[gk]
+				lines = append(lines, groupHead(gk, g[0], g[1]))
+				prevGroup = gk
+			}
+		}
+		if i == m.cur {
+			selLine = len(lines)
+		}
+		lines = append(lines, m.renderRow(r, i == m.cur, prevW))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, sDim.Render("  no sessions"+filterHint(m.filter)))
+	}
+
+	visible := m.height - 7
 	if visible < 3 {
 		visible = 3
 	}
-	start := m.cur - visible/2
-	if start > len(m.rows)-visible {
-		start = len(m.rows) - visible
+	start := selLine - visible/2
+	if start > len(lines)-visible {
+		start = len(lines) - visible
 	}
 	if start < 0 {
 		start = 0
 	}
 	end := start + visible
-	if end > len(m.rows) {
-		end = len(m.rows)
+	if end > len(lines) {
+		end = len(lines)
+	}
+	for _, ln := range lines[start:end] {
+		b.WriteString(ln + "\n")
 	}
 
-	for i := start; i < end; i++ {
-		r := m.rows[i]
-		sel := i == m.cur
-		dot := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI))).Render("●")
-		name := trunc(r.Name, colName-1)
+	// ---- footer ----
+	footer := m.footer()
+	b.WriteString("\n" + footer)
+	pos := fmt.Sprintf("  %d–%d/%d", start+1, end, len(lines))
+	if lipgloss.Width(footer)+lipgloss.Width(pos) <= m.width {
+		b.WriteString(sDim.Render(pos))
+	}
+	return b.String()
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func (m Model) hostCount() int {
+	set := map[string]bool{}
+	for _, r := range m.rows {
+		set[r.Host] = true
+	}
+	return len(set)
+}
+
+// renderRow renders one session row; when selected every cell gets the
+// selection background so the highlight spans the full line width.
+func (m Model) renderRow(r row, sel bool, prevW int) string {
+	dimBase := lipgloss.NewStyle()
+	if r.stale {
+		dimBase = sDim
+	}
+	cell := func(st lipgloss.Style, s string, w int) string {
+		st = dimBase.Inherit(st)
 		if sel {
-			name = sSel.Render("▌" + pad(name, colName-1))
-		} else {
-			name = " " + pad(name, colName-1)
+			st = st.Background(selBg)
 		}
-		host := pad(trunc(r.Host, colHost-1)+" ", colHost)
-		win := pad(strconv.Itoa(r.Windows)+" ", colWin)
-		att := pad("· ", colAtt)
-		if r.Attached {
-			att = pad(sAttached.Render("✓ "), colAtt)
-		}
-		act := pad(rel(time.Since(time.Unix(r.Activity, 0)))+" ", colAct)
-		tag := pad(trunc(r.Tag, colTag-1)+" ", colTag)
-		prev := sDim.Render(trunc(strings.ReplaceAll(r.Preview, "\n", " "), prevW))
-		line := dot + name + host + win + att + act + tag + prev
-		if r.stale {
-			line = sDim.Render(line)
-		}
-		b.WriteString(line + "\n")
+		return st.Render(pad(trunc(s, w), w))
 	}
-	if len(m.rows) == 0 {
-		b.WriteString(sDim.Render("  no sessions"+filterHint(m.filter)) + "\n")
+	gutter := " "
+	if sel {
+		gst := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI))).Background(selBg)
+		gutter = gst.Render("▌")
 	}
+	dotSt := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI)))
+	if sel {
+		dotSt = dotSt.Background(selBg)
+	}
+	dot := dotSt.Render("●")
+	name := cell(lipgloss.NewStyle(), r.Name, colName)
+	host := cell(lipgloss.NewStyle(), r.Host, colHost)
+	win := cell(lipgloss.NewStyle(), strconv.Itoa(r.Windows), colWin)
+	att := cell(lipgloss.NewStyle(), "·", colAtt)
+	if r.Attached {
+		att = cell(sAttached, "✓", colAtt)
+	}
+	act := cell(actStyle(time.Since(time.Unix(r.Activity, 0))), rel(time.Since(time.Unix(r.Activity, 0))), colAct)
+	tag := cell(lipgloss.NewStyle(), r.Tag, colTag)
+	prev := cell(sDim, strings.ReplaceAll(r.Preview, "\n", " "), prevW)
+	return gutter + dot + name + host + win + att + act + tag + prev
+}
 
-	b.WriteString("\n")
-	status := ""
+func (m Model) footer() string {
 	switch {
 	case m.err != "":
-		status = sErr.Render("✗ " + trunc(m.err, m.width-4))
+		return sErr.Render(" ✗ " + trunc(m.err, m.width-6))
 	case m.status != "":
-		status = sOK.Render("✓ " + m.status)
+		return sOK.Render(" ✓ " + m.status)
 	case m.inputMode == "filter":
-		status = sDim.Render("filter: " + m.input.View())
+		return sChipKey.Render(" filter ") + " " + m.input.View()
 	case m.inputMode != "":
-		status = sBar.Render(m.inputMode + ": ") + m.input.View()
+		return sChipKey.Render(" "+m.inputMode+" ") + " " + m.input.View()
 	}
-	if status == "" {
-		status = sDim.Render("enter attach · p preview · c color · t tag · r rename · n new · K kill · / filter · s sort · S reverse · ? help · q quit")
+	caps := [][2]string{
+		{"enter", "attach"}, {"p", "preview"}, {"c", "color"}, {"t", "tag"},
+		{"r", "rename"}, {"n", "new"}, {"K", "kill"}, {"/", "filter"},
+		{"1-5", "sort"}, {"S", "rev"}, {"?", "help"}, {"q", "quit"},
 	}
-	b.WriteString(status)
-	return b.String()
+	var out strings.Builder
+	out.WriteString(" ")
+	for _, c := range caps {
+		seg := keycap(c[0], c[1])
+		if lipgloss.Width(out.String())+lipgloss.Width(seg) > m.width-1 {
+			break
+		}
+		out.WriteString(seg)
+	}
+	return out.String()
 }
 
 func filterHint(f string) string {
@@ -941,37 +1114,45 @@ func filterHint(f string) string {
 }
 
 func (m Model) viewPreview() string {
-	head := sBar.Render("📄 "+m.vpRow.Name) + sDim.Render(" @ "+m.vpRow.Host+"  ·  esc close · j/k scroll")
-	return head + "\n" + m.vp.View() + "\n" + sDim.Render("scroll: j/k/up/down/pgup/pgdn")
+	title := sBar.Render("📄 "+m.vpRow.Name) +
+		sDim.Render("  @ "+m.vpRow.Host+" · last activity "+rel(time.Since(time.Unix(m.vpRow.Activity, 0)))+" ago") +
+		sDim.Render("  ·  esc close · j/k scroll")
+	body := title + "\n\n" + m.vp.View() + "\n" + sDim.Render("scroll: j/k/up/down/pgup/pgdn")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(strconv.Itoa(m.vpRow.def.ANSI))).
+		Padding(0, 1).
+		Render(body)
 }
 
 func (m Model) viewHelp() string {
+	head := func(s string) string { return sHead.Render(s) }
 	lines := []string{
-		"🧭 dtc — distributed tmux controller",
+		sTitle.Render("🧭 dtc") + sDim.Render(" distributed tmux controller — help"),
 		"",
-		"navigation",
+		head("navigation"),
 		"  j/k or ↑/↓     move           g/G  top/bottom    pgup/pgdn  page",
-		"  enter          attach (ssh or local)",
+		"  enter          attach (local, or ssh to the owning host)",
 		"",
-		"view",
-		"  p              live pane preview (3000 lines)",
+		head("view"),
+		"  p              live pane preview (last 3000 lines)",
 		"  /              filter by name/host/tag (esc clears)",
-		"  s              cycle sort: color → host → name → activity",
-		"  S              reverse sort      R  force refresh",
+		"  1…5            sort: 1 color · 2 host · 3 activity · 4 created · 5 name",
+		"  s              cycle sort        S  reverse        R  force refresh",
 		"",
-		"actions on selected session",
-		"  c              set color (updates Ghostty tab emoji everywhere)",
-		"  t              set tag (empty clears)     r  rename",
+		head("actions on the selected session"),
+		"  c              set color (updates the Ghostty tab emoji everywhere)",
+		"  t              set tag (empty clears)      r  rename",
 		"  K              kill session (confirm with y)",
 		"  n              new session on any host",
 		"",
-		"misc",
+		head("misc"),
 		"  ?              this help       q  quit",
 		"",
-		"colors/tags/title are stored as tmux user options (@dtc-*) on the owning",
-		"host and synced to the hub by the agent, so every machine sees them.",
+		sDim.Render("colors/tags/title are stored as tmux user options (@dtc-*) on the owning"),
+		sDim.Render("host and synced to the hub by the agent, so every machine sees them."),
 	}
-	body := lipgloss.NewStyle().Padding(1, 2).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("60")).Render(strings.Join(lines, "\n"))
+	body := lipgloss.NewStyle().Padding(1, 2).Border(lipgloss.RoundedBorder()).BorderForeground(accent).Render(strings.Join(lines, "\n"))
 	return body + sDim.Render("\n  esc back")
 }
 

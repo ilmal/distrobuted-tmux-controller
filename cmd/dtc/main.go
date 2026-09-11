@@ -148,6 +148,8 @@ func cmdLs(args []string) error {
 		less = func(a, b r) bool { return a.Host < b.Host || a.Host == b.Host && a.Name < b.Name }
 	case "activity":
 		less = func(a, b r) bool { return a.Activity > b.Activity }
+	case "created":
+		less = func(a, b r) bool { return a.Created > b.Created }
 	default:
 		pi := func(n string) int {
 			for i, d := range colors.Palette {
