@@ -24,3 +24,6 @@ ssh = "alias-in-ssh-config"
 
 [hosts.laptop]
 ssh = "nils@100.x.y.z"
+# hidden = true   # client machine (you sit at it, sessions are scratch) —
+#                 # left out of fleet views; reveal with TUI `H` / `ls --all`.
+#                 # The machine you run dtc on is never hidden from itself.

@@ -119,6 +119,7 @@ func colorNames() string {
 func cmdLs(args []string) error {
 	cfg := loadConfig()
 	sortMode := "color"
+	all := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--sort", "-s":
@@ -126,6 +127,8 @@ func cmdLs(args []string) error {
 			if i < len(args) {
 				sortMode = args[i]
 			}
+		case "--all":
+			all = true
 		}
 	}
 	fr, err := client.FetchFleet(cfg)
@@ -137,7 +140,16 @@ func cmdLs(args []string) error {
 		def colors.Def
 	}
 	var rows []r
+	hidden := 0
+	shownHosts := 0
 	for _, h := range fr.Host {
+		if cfg.IsHidden(h.Name) {
+			hidden += len(h.Sessions)
+			if !all {
+				continue
+			}
+		}
+		shownHosts++
 		for _, s := range h.Sessions {
 			rows = append(rows, r{s, colors.For(s.Name, s.Color)})
 		}
@@ -175,7 +187,10 @@ func cmdLs(args []string) error {
 		fmt.Printf("%-2s %-24s %-14s %3d %-3s %-5s %-12s %s\n",
 			dot, trunc(rw.Name, 24), trunc(rw.Host, 14), rw.Windows, att, rel(now.Sub(time.Unix(rw.Activity, 0))), trunc(rw.Tag, 12), prev)
 	}
-	fmt.Printf("\n%d sessions on %d hosts · hub %s\n", len(rows), len(fr.Host), cfg.HubURL)
+	fmt.Printf("\n%d sessions on %d hosts · hub %s\n", len(rows), shownHosts, cfg.HubURL)
+	if hidden > 0 && !all {
+		fmt.Printf("(+%d on hidden hosts — dtc ls --all to show)\n", hidden)
+	}
 	return nil
 }
 
@@ -212,10 +227,15 @@ func flagValue(args []string, flag string) (string, bool) {
 }
 
 // resolve finds where a named session lives: hub first, local fallback.
+// Sessions on hosts marked hidden are ignored (the hub-first path only —
+// your own machine is never hidden, so the local fallback always applies).
 func resolve(cfg *config.Config, name string) (model.Session, bool) {
 	if fr, err := client.FetchFleet(cfg); err == nil {
 		var best *model.Session
 		for _, h := range fr.Host {
+			if cfg.IsHidden(h.Name) {
+				continue
+			}
 			for i := range h.Sessions {
 				s := h.Sessions[i]
 				if s.Name == name && (best == nil || s.Activity > best.Activity) {

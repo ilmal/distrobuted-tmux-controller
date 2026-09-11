@@ -16,6 +16,10 @@ type HostCfg struct {
 	// SSH is the ssh destination used to reach the machine (an ~/.ssh/config
 	// alias or user@host). Empty means "this machine, run tmux locally".
 	SSH string `toml:"ssh"`
+	// Hidden marks a client machine (e.g. a laptop): its sessions are left out
+	// of fleet views. The local machine is never hidden from itself, and
+	// dashboards can reveal hidden hosts on demand (TUI `H`, `ls --all`).
+	Hidden bool `toml:"hidden"`
 }
 
 type Config struct {
@@ -105,4 +109,10 @@ func (c *Config) SSHFor(host string) (string, bool) {
 // IsLocal reports whether sessions reported by `host` are on this machine.
 func (c *Config) IsLocal(host string) bool {
 	return host == c.Hostname
+}
+
+// IsHidden reports whether a fleet host is marked as a client machine and
+// should stay out of fleet views. The machine you run on is never hidden.
+func (c *Config) IsHidden(host string) bool {
+	return host != c.Hostname && c.Hosts[host].Hidden
 }

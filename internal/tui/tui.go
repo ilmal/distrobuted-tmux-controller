@@ -36,6 +36,10 @@ type Model struct {
 	rows []row
 	cur  int
 
+	fleet      []model.Host // raw last-fetched fleet, incl. hidden hosts
+	showHidden bool
+	hiddenCnt  int
+
 	sort     int // 0 color, 1 host, 2 activity, 3 created, 4 name
 	desc     bool
 	filter   string
@@ -353,6 +357,9 @@ func (m Model) pickableHosts() []string {
 		set[r.Host] = true
 	}
 	for h := range m.cfg.Hosts {
+		if m.cfg.IsHidden(h) {
+			continue
+		}
 		set[h] = true
 	}
 	out := make([]string, 0, len(set))
@@ -513,6 +520,19 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4", "5":
 		m.sort = int(key.String()[0] - '1')
 		m.cur = 0
+	case "H":
+		m.showHidden = !m.showHidden
+		prevKey := ""
+		if m.cur >= 0 && m.cur < len(m.rows) {
+			prevKey = m.rows[m.cur].key()
+		}
+		m.buildRows()
+		m.restoreCursor(prevKey)
+		m.status = "hidden hosts shown"
+		if !m.showHidden {
+			m.status = "hidden hosts hidden"
+		}
+		m.statusAt = time.Now()
 	case "R":
 		return m, fetchCmd(m.cfg)
 	case "?":
@@ -728,8 +748,23 @@ func (m *Model) loadFleet(fr *model.FleetResponse) {
 	if m.cur >= 0 && m.cur < len(m.rows) {
 		prevKey = m.rows[m.cur].key()
 	}
+	m.fleet = fr.Host
+	m.buildRows()
+	m.restoreCursor(prevKey)
+}
+
+// buildRows flattens the cached fleet into display rows, leaving out hosts
+// marked hidden (config `hidden = true`) unless reveal is on.
+func (m *Model) buildRows() {
 	var rows []row
-	for _, h := range fr.Host {
+	m.hiddenCnt = 0
+	for _, h := range m.fleet {
+		if m.cfg.IsHidden(h.Name) {
+			m.hiddenCnt += len(h.Sessions)
+			if !m.showHidden {
+				continue
+			}
+		}
 		for _, s := range h.Sessions {
 			rows = append(rows, row{Session: s, def: colors.For(s.Name, s.Color), stale: h.Stale()})
 		}
@@ -737,7 +772,6 @@ func (m *Model) loadFleet(fr *model.FleetResponse) {
 	m.rows = rows
 	m.totalAll = len(rows)
 	m.applyFilterSort()
-	m.restoreCursor(prevKey)
 }
 
 func (m *Model) applyFilterSort() {
@@ -923,6 +957,9 @@ func (m Model) viewList() string {
 	}
 	if len(hostsFresh) > 0 {
 		ctx += sDim.Render(fmt.Sprintf("  ·  %d/%d hosts up", len(hostsFresh), m.hostCount()))
+	}
+	if m.hiddenCnt > 0 && !m.showHidden {
+		ctx += sDim.Render(fmt.Sprintf("  ·  %d hidden (H shows them)", m.hiddenCnt))
 	}
 	if m.filter != "" {
 		ctx += sDim.Render("  ·  filter ") + sOK.Render("/"+m.filter+"/")
@@ -1139,6 +1176,7 @@ func (m Model) viewHelp() string {
 		"  /              filter by name/host/tag (esc clears)",
 		"  1…5            sort: 1 color · 2 host · 3 activity · 4 created · 5 name",
 		"  s              cycle sort        S  reverse        R  force refresh",
+		"  H              show/hide hosts marked hidden in config (client machines)",
 		"",
 		head("actions on the selected session"),
 		"  c              set color (updates the Ghostty tab emoji everywhere)",

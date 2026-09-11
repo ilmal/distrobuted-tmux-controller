@@ -67,6 +67,13 @@ applied out-of-band: `kubectl -n dtc create secret generic dtc-token --from-file
 | `s`, `S` | cycle sort, reverse |
 | `/` | filter by name/host/tag (`esc` clears) |
 | `R`, `?`, `q` | refresh, help, quit |
+| `H` | reveal/hide hosts marked `hidden = true` in config (client machines) |
+
+Client machines (a laptop you sit at, whose sessions are just terminal
+windows) can be marked `hidden = true` in `config.toml` — they drop out of
+the TUI, `ls`, and name resolution, with a `(+N hidden — dtc ls --all)`
+note so nothing is silently lost. The local machine is never hidden from
+itself; reveal with `H` (TUI) or `--all` (ls) any time.
 
 Host and color sorts render grouped section headers with per-group counts;
 activity freshness is color-coded (green < 5 min, amber < 1 h, dim older).
