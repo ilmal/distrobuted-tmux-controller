@@ -38,6 +38,26 @@ func (d Def) Title(session string) string {
 	return d.Emoji + " " + session
 }
 
+// Dot is the glyph a color reads as at a glance: filled when the session has a
+// color, hollow when it does not.
+//
+// It matters that this is a *pair* with Colored, because Uncolored carries
+// ANSI -1 and -1 is not a valid SGR parameter: a caller that colours the dot
+// without checking Colored first emits "\x1b[38;5;-1m" — which a text UI prints
+// as literal garbage, and which a terminal swallows, leaving a filled dot in
+// the default foreground that claims a colour the session does not have.
+func (d Def) Dot() string {
+	if !d.Colored() {
+		return HollowDot
+	}
+	return FilledDot
+}
+
+const (
+	FilledDot = "●"
+	HollowDot = "○"
+)
+
 // Palette is the canonical set of colors: their ANSI tone, hex and emoji are
 // fixed here, because a dashboard should never be able to break how a color
 // renders. Only the display label and the order are user-editable (see

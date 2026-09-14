@@ -180,7 +180,12 @@ func cmdLs(args []string) error {
 	now := time.Now()
 	fmt.Printf("%-2s %-24s %-14s %-3s %-5s %-12s %s\n", "", "SESSION", "HOST", "ATT", "ACT", "TAG", "PREVIEW")
 	for _, rw := range rows {
-		dot := "\x1b[38;5;" + strconv.Itoa(rw.def.ANSI) + "m●\x1b[0m"
+		// An uncolored dot stays bare — see colors.Def.Dot: colouring it would emit
+		// the invalid SGR parameter -1 and put a fake colour in the table.
+		dot := rw.def.Dot()
+		if rw.def.Colored() {
+			dot = "\x1b[38;5;" + strconv.Itoa(rw.def.ANSI) + "m" + dot + "\x1b[0m"
+		}
 		att := "·"
 		if rw.Attached {
 			att = "\x1b[32m✓\x1b[0m"

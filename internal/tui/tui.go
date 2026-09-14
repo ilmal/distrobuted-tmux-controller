@@ -1763,14 +1763,26 @@ func (m Model) renderRow(r row, sel bool, prevW int, single bool) string {
 	}
 	gutter := " "
 	if sel {
-		gst := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI))).Background(selBg)
-		gutter = gst.Render("▌")
+		// The selection bar takes the session's color, or the accent when it has
+		// none (ANSI -1 is not a valid SGR parameter).
+		gutFg := lipgloss.Color(strconv.Itoa(r.def.ANSI))
+		if !r.def.Colored() {
+			gutFg = accent
+		}
+		gutter = lipgloss.NewStyle().Foreground(gutFg).Background(selBg).Render("▌")
 	}
-	dotSt := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI)))
-	if sel {
-		dotSt = dotSt.Background(selBg)
+	// An uncolored session gets a hollow dot, like its group heading: it has no
+	// color, and a filled dot in the terminal's default foreground would read as
+	// a color the session does not have. Uncolored also carries ANSI -1, which is
+	// not a valid SGR parameter.
+	dot := "○"
+	if r.def.Colored() {
+		dotSt := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(r.def.ANSI)))
+		if sel {
+			dotSt = dotSt.Background(selBg)
+		}
+		dot = dotSt.Render("●")
 	}
-	dot := dotSt.Render("●")
 	name := cell(lipgloss.NewStyle(), r.Name, colName)
 	host := ""
 	if !single {
