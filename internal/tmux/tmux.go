@@ -4,6 +4,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -89,6 +90,136 @@ func Capture(name string, lines int) (string, error) {
 	return strings.TrimRight(out, "\n"), nil
 }
 
+// CurrentSession returns the name of the tmux session this process is running
+// inside, or ok=false when it is not running inside tmux at all. It is what
+// makes "open this group here" possible — the new windows are siblings of this
+// one, in this session.
+func CurrentSession() (string, bool) {
+	if os.Getenv("TMUX") == "" {
+		return "", false
+	}
+	out, err := run("display-message", "-p", "#{session_name}")
+	if err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(out)
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// AttachWindowCmd builds the command that attaches `session` inside a window
+// that is already running in this tmux session.
+//
+// TMUX must be cleared: with it set, tmux refuses the nested attach and the new
+// window dies instantly. Clearing it makes the window's pane attach to the
+// target session normally, which is exactly the "one tab per session" result.
+//
+// It returns the command the pane will run, not one this process runs: the
+// caller's own environment is irrelevant, because only the panes spawned *by*
+// this command inherit what AttachWindowCmd sets up. That is why OpenWindow
+// has to be handed the pane's environment separately (see paneEnv).
+func AttachWindowCmd(session string) *exec.Cmd {
+	cmd := exec.Command("tmux", "new-session", "-A", "-s", session)
+	cmd.Env = envWithout("TMUX")
+	return cmd
+}
+
+// OpenWindow spawns a detached window right after the window `after` (in the
+// session `after` belongs to) running attachCmd, and returns the new window id.
+//
+// `after` is a window id, or a session name for the first window of a group.
+// A *session* name resolves to that session's current window every time, so
+// opening a whole group against the session would insert each window before the
+// last one and the tabs would come out reversed; the caller threads the
+// previous window id back in to keep them in the order it listed them.
+//
+// The pane does not inherit this process's environment — the tmux *server*
+// spawns it — so attachCmd's own Env has to be carried across the tmux command
+// line. It matters: the server sets TMUX in every pane it creates, and a pane
+// that still has it refuses to attach to a session ("sessions should be nested
+// with care"), so the window would die the instant it opened. AttachWindowCmd
+// clears exactly that variable; dropping its Env here silently discards the fix.
+func OpenWindow(after string, attachCmd *exec.Cmd) (string, error) {
+	if attachCmd == nil || len(attachCmd.Args) == 0 {
+		return "", fmt.Errorf("no attach command")
+	}
+	argv := strings.Join(quoteAll(attachCmd.Args), " ")
+	// The server picks its own socket and passes TMUX to the pane it spawns, so
+	// the pane has to clear the variable for itself.
+	if len(attachCmd.Env) > 0 {
+		argv = "env -u TMUX " + argv
+	}
+	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}", "-a", "-t", after}
+	// -S is a global option and has to come before the command name; after it,
+	// tmux reads it as an (unknown) new-window flag and quietly ignores it,
+	// leaving the window on the default server where this session does not
+	// exist. Keep the window on the server this session actually lives on: a
+	// tmux started with -L or -S is not on the default socket.
+	if dir := socketDir(); dir != "" {
+		args = append([]string{"-S", dir}, args...)
+	}
+	out, err := run(append(args, argv)...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// socketDir is the socket the tmux this process is running inside was started
+// with, or "" for the default one. TMUX is "<socket-path>,<server-pid>,<index>".
+func socketDir() string {
+	v := os.Getenv("TMUX")
+	if v == "" {
+		return ""
+	}
+	if i := strings.IndexByte(v, ','); i > 0 {
+		return v[:i]
+	}
+	return ""
+}
+
+// NameWindow applies the session's tab title to a window just opened in the
+// current session, so the tabs read "<emoji> <session>" like everything else.
+//
+// It sets @dtc-title at *window* scope. install.sh points the terminal tab
+// title at that option (set -g set-titles-string '#{@dtc-title}'), which tmux
+// re-resolves as you switch windows, so each tab shows the session in it.
+// Writing set-titles-string here instead would set a *session* option — every
+// tab in the session would then carry the last-opened session's name.
+func NameWindow(windowID, title string) error {
+	if windowID == "" {
+		return nil
+	}
+	_, err := run("set-option", "-w", "-t", windowID, "@dtc-title", title)
+	return err
+}
+
+// envWithout copies the process environment without the named variables.
+func envWithout(keys ...string) []string {
+	drop := map[string]bool{}
+	for _, k := range keys {
+		drop[k] = true
+	}
+	var out []string
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i > 0 && drop[kv[:i]] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+func quoteAll(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = Quote(a)
+	}
+	return out
+}
+
 // Preview builds the short multi-line snippet sent in heartbeats.
 func Preview(name string) string {
 	raw, err := Capture(name, 8)
@@ -135,7 +266,7 @@ func HeartbeatSessions() []model.Session {
 	for i := range sessions {
 		s := &sessions[i]
 		s.Preview = Preview(s.Name)
-		want := colors.For(s.Name, s.Color).Emoji + " " + s.Name
+		want := colors.For(s.Name, s.Color).Title(s.Name)
 		if s.Title != want {
 			args = append(args, "set-option", "-t", s.Name, "@dtc-title", want, ";")
 		}

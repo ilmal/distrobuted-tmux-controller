@@ -64,6 +64,16 @@ func PatchMeta(cfg *config.Config, p model.MetaPatch) error {
 	return request(cfg, http.MethodPatch, "/api/v1/meta", p, nil)
 }
 
+// PutPalette stores the fleet's color labels and display order.
+func PutPalette(cfg *config.Config, entries []model.PaletteEntry) error {
+	return request(cfg, http.MethodPut, "/api/v1/palette", model.Palette{Colors: entries}, nil)
+}
+
+// PutOrder stores one color group's manual session ordering.
+func PutOrder(cfg *config.Config, o model.GroupOrder) error {
+	return request(cfg, http.MethodPut, "/api/v1/order", o, nil)
+}
+
 func PostHeartbeat(cfg *config.Config, hb model.Heartbeat) error {
 	return request(cfg, http.MethodPost, "/api/v1/heartbeat", hb, nil)
 }

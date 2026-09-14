@@ -63,7 +63,11 @@ applied out-of-band: `kubectl -n dtc create secret generic dtc-token --from-file
 | `p` | live pane preview (3000 lines, scrollable, session-colored border) |
 | `c` / `t` / `r` | set color / tag / rename (applies on the owning host) |
 | `n` / `K` | new session on any host / kill (with confirm) |
-| `1`–`5` | sort: `1` color · `2` host (grouped, local first) · `3` activity · `4` created · `5` name |
+| `V` | switch view: **colors** (grouped, manual order) ⇄ **flat list** (sortable) |
+| `o` | open every session in the group you are on as tabs in this tmux session |
+| `⇧↑` / `⇧↓` | move the selected session one place inside its color group |
+| `P` | manage colors: reorder the groups, rename them |
+| `1`–`5` | sort (flat list only): `1` color · `2` host (grouped, local first) · `3` activity · `4` created · `5` name |
 | `s`, `S` | cycle sort, reverse |
 | `tab` / `⇧tab` | next / previous host tab (`]` / `[` also work) |
 | `0` | the “all” tab |
@@ -98,7 +102,33 @@ Host and color sorts render grouped section headers with per-group counts;
 activity freshness is color-coded (green < 5 min, amber < 1 h, dim older).
 
 CLI: `dtc ls [--sort color|host|activity|created|name]`, `dtc attach NAME`,
-`dtc new NAME --host H`, `dtc kill NAME`, `dtc color NAME <color|auto>`.
+`dtc new NAME --host H`, `dtc kill NAME`, `dtc color NAME <color|none>`.
+
+## Two views
+
+`V` switches between the two ways of reading the same fleet.
+
+- **colors** — one heading per color, and the order is *yours*: `⇧↑`/`⇧↓`
+  move a session inside its group, `P` reorders and renames the groups
+  themselves. The `1`–`5` sort keys do nothing here; a manual order and a sort
+  key would fight, and the manual one wins.
+- **flat list** — one sortable list (`1`–`5`, `s`, `S`). A color is only the
+  dot on the left, never a sub-heading.
+
+Because nothing is colored by default, the colors view initially renders as a
+single plain list — headings only appear once you actually use two or more
+colors.
+
+### Opening a whole color
+
+`o` on a color group opens **every session in it as a new window (tab) of the
+tmux session dtc is running in** — dtc's own window plus one tab per session,
+each attached. A group that spans machines works too: sessions on this host
+become local windows directly, and a remote session's window is a shell running
+the same `ssh -t <host> tmux new-session -A -s <name>` that `enter` uses.
+
+dtc has to be running inside tmux for this (there is no window to add to
+otherwise); it says so instead of failing silently.
 
 ## Colors and Ghostty tabs
 
@@ -121,11 +151,16 @@ dots stays calm on a dark terminal:
 | `218` | pink | 🌸 |
 | `250` | gray | ⚪ |
 
-A session with no color set gets a **deterministic** one — fnv32a of the
-session name, modulo nine — so the same session is always the same color on
-every dashboard, without anyone choosing it. Set one explicitly with `c`, or
-put it back on automatic with `dtc color NAME auto`. The palette order doubles
-as the default color-sort group order.
+**Nothing is colored until you say so.** A new session starts plain, and the
+fleet starts as one list; `c` gives a session a color, `o` opens a whole group,
+and `dtc color NAME none` clears one again. A color you set means exactly what
+you decided it means.
+
+Renaming a color (`P`, then `r`) changes only its **label** — the key stored on
+the session never moves, so a rename can never orphan a session. The palette's
+order and labels, and each group's manual session order, live **on the hub**,
+not in per-machine config or a tmux option: a color group spans machines, so
+one write is what keeps every dashboard grouping the fleet identically.
 
 ### Reading a row
 
@@ -153,6 +188,16 @@ tab-color OSC, the agent is the single place to add it.
 GET  /healthz            liveness (no auth)
 GET  /                   HTML status page (no auth)
 POST /api/v1/heartbeat   agent: {host, tmux_version, os, arch, hidden, sessions[]}
-GET  /api/v1/sessions    fleet state
+GET  /api/v1/sessions    fleet state + palette + group order
 PATCH /api/v1/meta       dashboard: optimistic color/tag patch (pinned 90s)
+GET  /api/v1/palette     the fleet's colors in display order, with labels
+PUT  /api/v1/palette     replace palette order/labels (must name all nine once)
+PUT  /api/v1/order       replace one color group's manual session order
 ```
+
+`/api/v1/sessions` carries the palette and the order alongside the hosts, so a
+dashboard renders the fleet exactly as every other one does from a single
+fetch. The two `PUT`s reject payloads that would leave the fleet inconsistent:
+a palette that does not name each of the nine colors exactly once is refused,
+and an order that names a session that is gone, or one that is no longer in
+that group, is dropped rather than stored.

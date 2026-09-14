@@ -31,6 +31,9 @@ type row struct {
 
 func (r row) key() string { return r.Host + "\x1f" + r.Name }
 
+// groupKey is the color group a row belongs to ("" = uncolored).
+func (r row) groupKey() string { return r.def.Name }
+
 type Model struct {
 	cfg *config.Config
 
@@ -44,6 +47,16 @@ type Model struct {
 	fleet      []model.Host // raw last-fetched fleet, incl. hidden hosts
 	showHidden bool
 	hiddenCnt  int
+
+	// palette is the fleet's colors in display order (labels included); order is
+	// each color group's manual session ordering, both owned by the hub. They
+	// are kept so the local-only fallback still renders the last known grouping.
+	palette []model.PaletteEntry
+	order   []model.GroupOrder
+
+	// grouped is the colors view (color groups as headings, manual order, no
+	// sorting); the alternative is a flat list you can sort. `V` toggles.
+	grouped bool
 
 	sort     int // 0 color, 1 host, 2 activity, 3 created, 4 name
 	desc     bool
@@ -65,16 +78,24 @@ type Model struct {
 
 	width, height int
 
-	input     textinput.Model
-	inputMode string // "", "filter", "rename", "tag", "new"
-	inputHost string
-	inputRow  int
+	input      textinput.Model
+	inputMode  string // "", "filter", "rename", "tag", "new"
+	inputHost  string
+	inputRow   int
+	inputColor string // color a new session should start with ("" = none)
 
 	colorPick    bool
 	colorPickCur int
 	hostPick     bool
 	hostPickCur  int
-	confirmRow   int
+	palPick      bool
+	palPickCur   int
+	// palRename is the color key being renamed while inputMode == "palname".
+	palRename string
+	// pinCursor is a session key the cursor returns to after the next refresh
+	// (a reorder moves the row under the cursor).
+	pinCursor  string
+	confirmRow int
 
 	status   string
 	statusAt time.Time
@@ -101,6 +122,10 @@ type previewMsg struct {
 type actionMsg struct {
 	err  error
 	note string
+	// keep is a session key the cursor should follow after the refresh. A
+	// reorder moves the row the user is looking at, so without this the
+	// selection would jump to whatever now occupies that line.
+	keep string
 }
 
 // ---- styles ----
@@ -152,7 +177,13 @@ func New(cfg *config.Config) Model {
 	ti := textinput.New()
 	ti.CharLimit = 64
 	ti.Prompt = ""
-	return Model{cfg: cfg, input: ti, confirmRow: -1}
+	return Model{
+		cfg:        cfg,
+		input:      ti,
+		confirmRow: -1,
+		grouped:    true, // colors view is the default; V gives the flat sortable list
+		palette:    colors.DefaultPalette(),
+	}
 }
 
 func Run(cfg *config.Config) error {
@@ -257,12 +288,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = msg.note
 				m.statusAt = time.Now()
 			}
+			if msg.keep != "" {
+				m.pinCursor = msg.keep
+			}
 		}
 		return m, fetchCmd(m.cfg)
 	}
 
 	if m.inputMode != "" {
 		return m.updateInput(msg)
+	}
+	if m.palPick {
+		return m.updatePalPick(msg)
 	}
 	if m.colorPick {
 		return m.updateColorPick(msg)
@@ -320,9 +357,11 @@ func (m Model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.renameCmd(m.rows[m.inputRow], val)
 			case "tag":
 				return m, m.tagCmd(m.rows[m.inputRow], val)
+			case "palname":
+				return m, m.renameColorCmd(m.palRename, val)
 			case "new":
 				if val != "" {
-					return m, m.newCmd(m.inputHost, val)
+					return m, m.newCmd(m.inputHost, val, m.inputColor)
 				}
 			}
 			return m, nil
@@ -358,6 +397,84 @@ func (m Model) updateColorPick(msg tea.Msg) (tea.Model, tea.Cmd) {
 				color = colors.Palette[m.colorPickCur].Name
 			}
 			return m, m.colorCmd(r, color)
+		}
+	}
+	return m, nil
+}
+
+// pickerColorKeys is the color picker's entries in palette display order,
+// ending with "" (no color).
+func (m Model) pickerColorKeys() []string {
+	out := make([]string, 0, len(colors.Palette)+1)
+	for _, k := range m.paletteKeys() {
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	return append(out, "")
+}
+
+// pickerIndex is where `key` sits in the picker, defaulting to the last entry.
+func (m Model) pickerIndex(key string) int {
+	for i, k := range m.pickerColorKeys() {
+		if k == key {
+			return i
+		}
+	}
+	return len(colors.Palette)
+}
+
+// palKeys is the palette manager's entries: the colors only. Uncolored is not
+// a palette color you can rename or order — it always sits below them.
+func (m Model) palKeys() []string {
+	keys := m.paletteKeys()
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (m Model) updatePalPick(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	keys := m.palKeys()
+	n := len(keys)
+	switch key.String() {
+	case "esc", "q", "P":
+		m.palPick = false
+	case "up", "k":
+		if m.palPickCur > 0 {
+			m.palPickCur--
+		}
+	case "down", "j":
+		if m.palPickCur < n-1 {
+			m.palPickCur++
+		}
+	case "shift+up":
+		if m.palPickCur > 0 {
+			cur := keys[m.palPickCur]
+			m.palPickCur--
+			return m, m.moveGroupTo(cur, m.palPickCur)
+		}
+	case "shift+down":
+		if m.palPickCur < n-1 {
+			cur := keys[m.palPickCur]
+			m.palPickCur++
+			return m, m.moveGroupTo(cur, m.palPickCur)
+		}
+	case "r":
+		if n > 0 {
+			m.palRename = keys[m.palPickCur]
+			m.inputMode = "palname"
+			m.input.Placeholder = "name for " + keys[m.palPickCur] + " (was " + m.colorLabel(keys[m.palPickCur]) + ")"
+			m.input.SetValue(m.colorLabel(keys[m.palPickCur]))
+			m.input.Focus()
+			return m, textinput.Blink
 		}
 	}
 	return m, nil
@@ -491,7 +608,7 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "c":
 		if len(m.rows) > 0 {
 			m.colorPick = true
-			m.colorPickCur = 0
+			m.colorPickCur = m.pickerIndex(m.rows[m.cur].groupKey())
 		}
 	case "t":
 		if len(m.rows) > 0 {
@@ -512,8 +629,38 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		}
 	case "n":
+		// A new session starts in the color you are standing on, so creating
+		// another "green" session is just n, type a name, enter.
+		m.inputColor = ""
+		if len(m.rows) > 0 {
+			m.inputColor = m.rows[m.cur].groupKey()
+		}
 		m.hostPick = true
 		m.hostPickCur = 0
+	case "V":
+		m.grouped = !m.grouped
+		m.applyFilterSort()
+		if m.grouped {
+			m.status = "colors view — groups are manual (⇧↑/⇧↓ to reorder, o opens one)"
+		} else {
+			m.status = "flat list — sorting by " + m.sortLabel()
+		}
+		m.statusAt = time.Now()
+	case "P":
+		m.palPick = true
+		m.palPickCur = 0
+	case "o":
+		if len(m.rows) > 0 {
+			return m, m.openGroupCmd(m.rows[m.cur].groupKey())
+		}
+	case "shift+up":
+		if m.grouped && len(m.rows) > 0 {
+			return m, m.moveSession(m.cur, -1)
+		}
+	case "shift+down":
+		if m.grouped && len(m.rows) > 0 {
+			return m, m.moveSession(m.cur, 1)
+		}
 	case "K", "x":
 		if len(m.rows) > 0 {
 			m.confirmRow = m.cur
@@ -659,7 +806,7 @@ func (m Model) attachCmd(r row) tea.Cmd {
 		cmd = tmux.AttachCmd(r.Name)
 	}
 	if os.Getenv("TMUX") == "" {
-		title := r.def.Emoji + " " + r.Name
+		title := r.def.Title(r.Name)
 		if remote {
 			title += " · " + r.Host
 		}
@@ -700,16 +847,17 @@ func (m Model) renameCmd(r row, newName string) tea.Cmd {
 	if newName == "" || newName == r.Name {
 		return nil
 	}
-	def := colors.For(newName, r.Color)
+	// The color travels with the session; renaming does not re-color it.
+	title := r.def.Title(newName)
 	return func() tea.Msg {
 		err := m.doTmux(r.Host, "rename-session", "-t", r.Name, newName)
 		if err == nil {
-			err = m.doTmux(r.Host, "set-option", "-t", newName, "@dtc-title", def.Emoji+" "+newName)
+			err = m.doTmux(r.Host, "set-option", "-t", newName, "@dtc-title", title)
 		}
 		if err == nil {
 			m.kickAgent(r.Host)
 		}
-		return actionMsg{err: err, note: "renamed to " + newName}
+		return actionMsg{err: err, note: "renamed to " + newName, keep: r.Host + "\x1f" + newName}
 	}
 }
 
@@ -739,24 +887,21 @@ func (m Model) tagCmd(r row, tag string) tea.Cmd {
 func (m Model) colorCmd(r row, color string) tea.Cmd {
 	return func() tea.Msg {
 		var err error
-		if color == "" { // auto
+		if color == "" { // clear it — the session goes back to no color
 			err = m.doTmux(r.Host, "set-option", "-u", "-t", r.Name, "@dtc-color")
 		} else {
 			err = m.doTmux(r.Host, "set-option", "-t", r.Name, "@dtc-color", color)
 		}
-		def := colors.For(r.Name, color)
+		title := colors.For(r.Name, color).Title(r.Name)
 		if err == nil {
-			err = m.doTmux(r.Host, "set-option", "-t", r.Name, "@dtc-title", def.Emoji+" "+r.Name)
+			err = m.doTmux(r.Host, "set-option", "-t", r.Name, "@dtc-title", title)
 		}
 		if err == nil {
 			m.kickAgent(r.Host)
 			_ = client.PatchMeta(m.cfg, model.MetaPatch{Host: r.Host, Name: r.Name, Color: &color})
 		}
-		note := "color: " + def.Name
-		if color == "" {
-			note = "color: auto"
-		}
-		return actionMsg{err: err, note: note}
+		note := "color: " + m.colorLabel(color)
+		return actionMsg{err: err, note: note, keep: r.key()}
 	}
 }
 
@@ -764,8 +909,213 @@ func (m Model) killCmd(r row) tea.Cmd {
 	return m.runMutation(r.Host, "killed "+r.Name, "kill-session", "-t", r.Name)
 }
 
-func (m Model) newCmd(host, name string) tea.Cmd {
-	return m.runMutation(host, "created "+name+" on "+host, "new-session", "-d", "-s", name)
+// newCmd creates a session, in `color` when the cursor was standing on a color
+// group. The color is written before the agent is kicked so the new session
+// never flashes uncolored in the fleet.
+func (m Model) newCmd(host, name, color string) tea.Cmd {
+	note := "created " + name + " on " + host
+	if color != "" {
+		note += " in " + m.colorLabel(color)
+	}
+	return func() tea.Msg {
+		err := m.doTmux(host, "new-session", "-d", "-s", name)
+		if err == nil && color != "" {
+			err = m.doTmux(host, "set-option", "-t", name, "@dtc-color", color)
+		}
+		if err == nil {
+			m.kickAgent(host)
+		}
+		return actionMsg{err: err, note: note}
+	}
+}
+
+// groupHint describes the keys that act on the group the cursor is inside.
+func (m Model) groupHint() string {
+	return "o opens all · ⇧↑/⇧↓ reorder"
+}
+
+// openGroupCmd opens every session in one color group as a new window (tab) of
+// the tmux session dtc is running in, each attached — dtc's own window plus one
+// per session.
+//
+// Sessions on this machine become windows here directly. A session on another
+// machine has no local tmux session until something attaches to it, so its
+// window is a plain shell running `ssh -t <host> tmux attach`; that is the same
+// command `enter` uses, just planted in a window instead of taking over the
+// terminal.
+func (m Model) openGroupCmd(group string) tea.Cmd {
+	// Snapshot the group from the unfiltered rows: a filter narrows the view,
+	// but "open this color" means the color. Order it the way the group is
+	// listed, so the tabs come out in the order they were read.
+	var members []row
+	for _, r := range m.allRows {
+		if r.groupKey() == group {
+			members = append(members, r)
+		}
+	}
+	ord, rank := m.ordMap(), m.groupRank()
+	sort.SliceStable(members, func(i, j int) bool {
+		return m.groupLess(members[i], members[j], rank, ord)
+	})
+	localOnly := m.tabHost != allTab && !m.cfg.IsLocal(m.tabHost)
+	if localOnly {
+		members = nil
+	}
+	label := m.colorLabel(group)
+	into, inside := tmux.CurrentSession()
+	return func() tea.Msg {
+		if len(members) == 0 {
+			if !inside {
+				return actionMsg{err: fmt.Errorf("dtc is not running inside tmux — open %q from a tmux pane", label)}
+			}
+			return actionMsg{err: fmt.Errorf("no sessions in %q on this host", label)}
+		}
+		if !inside {
+			return actionMsg{err: fmt.Errorf("not inside tmux: run dtc in a tmux pane to open %q here", label)}
+		}
+		opened := 0
+		var firstErr error
+		// Each window is placed after the one before it, so the tabs come out in
+		// the order the group lists them. Anchoring every window to the *session*
+		// would pin them all to its current window and reverse the group.
+		anchor := into
+		for _, r := range members {
+			var cmd *exec.Cmd
+			if m.cfg.IsLocal(r.Host) {
+				cmd = tmux.AttachWindowCmd(r.Name)
+			} else {
+				alias, ok := m.cfg.SSHFor(r.Host)
+				if !ok || alias == "" {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("no ssh route for %q", r.Host)
+					}
+					continue
+				}
+				cmd = exec.Command("ssh", "-t", "-o", "ConnectTimeout=8", alias,
+					"tmux new-session -A -s "+tmux.Quote(r.Name))
+			}
+			id, err := tmux.OpenWindow(anchor, cmd)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			anchor = id
+			// Name the tab after the session once its pane has attached.
+			time.Sleep(350 * time.Millisecond)
+			title := r.def.Title(r.Name)
+			if !m.cfg.IsLocal(r.Host) {
+				title += " · " + r.Host
+			}
+			_ = tmux.NameWindow(id, title)
+			opened++
+		}
+		if opened == 0 && firstErr != nil {
+			return actionMsg{err: firstErr}
+		}
+		note := fmt.Sprintf("opened %d session%s from %s", opened, plural(opened), label)
+		if firstErr != nil {
+			note += " (some failed)"
+		}
+		return actionMsg{note: note}
+	}
+}
+
+// moveSession moves the selected session one place within its color group and
+// stores the group's new order on the hub.
+//
+// A group's members are spread across machines, so the order cannot live in a
+// tmux option on any one of them — it is fleet state, and it goes to the hub.
+func (m Model) moveSession(cur, delta int) tea.Cmd {
+	if cur < 0 || cur >= len(m.rows) {
+		return nil
+	}
+	group := m.rows[cur].groupKey()
+	// The group's members in display order, ignoring the tab filter: reordering
+	// while a filter or another tab hides half of them would otherwise write an
+	// order that forgets the hidden half.
+	keys := m.paletteKeys()
+	rank := map[string]int{}
+	for i, k := range keys {
+		rank[k] = i
+	}
+	ord := m.ordMap()
+	var members []row
+	for _, r := range m.allRows {
+		if r.groupKey() != group {
+			continue
+		}
+		if m.tabHost != allTab && r.Host != m.tabHost {
+			continue
+		}
+		members = append(members, r)
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		oi, oj := ord[members[i].key()], ord[members[j].key()]
+		switch {
+		case oi > 0 && oj > 0:
+			return oi < oj
+		case oi > 0:
+			return true
+		case oj > 0:
+			return false
+		}
+		return members[i].Name < members[j].Name
+	})
+	idx := -1
+	for i, r := range members {
+		if r.key() == m.rows[cur].key() {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	to := idx + delta
+	if to < 0 || to >= len(members) {
+		return nil
+	}
+	members[idx], members[to] = members[to], members[idx]
+
+	items := make([]model.OrderedItem, 0, len(members))
+	for _, r := range members {
+		items = append(items, model.OrderedItem{Host: r.Host, Name: r.Name})
+	}
+	newKey := members[to].key()
+	return func() tea.Msg {
+		err := client.PutOrder(m.cfg, model.GroupOrder{Group: group, Items: items})
+		return actionMsg{err: err, note: "reordered " + m.colorLabel(group), keep: newKey}
+	}
+}
+
+// renameColorCmd sets a color's display label. The color's key — what every
+// session actually stores — never changes, so renaming cannot orphan a session.
+func (m Model) renameColorCmd(key, label string) tea.Cmd {
+	label = colors.NormalizeLabel(label)
+	if key == "" || label == "" {
+		return nil
+	}
+	entries := make([]model.PaletteEntry, 0, len(m.paletteKeys()))
+	for _, k := range m.paletteKeys() {
+		if k == "" {
+			continue
+		}
+		l := colors.LabelOf(m.palette, k)
+		if k == key {
+			l = label
+		}
+		entries = append(entries, model.PaletteEntry{Name: k, Label: l})
+	}
+	return func() tea.Msg {
+		err := client.PutPalette(m.cfg, entries)
+		note := "renamed color " + key + " to " + label
+		if err != nil {
+			note = ""
+		}
+		return actionMsg{err: err, note: note}
+	}
 }
 
 // ---- fleet loading ----
@@ -775,9 +1125,52 @@ func (m *Model) loadFleet(fr *model.FleetResponse) {
 	if m.cur >= 0 && m.cur < len(m.rows) {
 		prevKey = m.rows[m.cur].key()
 	}
+	if m.pinCursor != "" {
+		prevKey = m.pinCursor
+		m.pinCursor = ""
+	}
 	m.fleet = fr.Host
+	if len(fr.Colors) > 0 {
+		m.palette = fr.Colors
+	}
+	if fr.Order != nil {
+		m.order = fr.Order
+	}
 	m.buildRows()
 	m.restoreCursor(prevKey)
+}
+
+// ordMap resolves "host\x1fname" to its manual 1-based position.
+func (m *Model) ordMap() map[string]int {
+	out := map[string]int{}
+	for _, g := range m.order {
+		for i, it := range g.Items {
+			out[it.Host+"\x1f"+it.Name] = i + 1
+		}
+	}
+	return out
+}
+
+// paletteKeys returns the color keys in display order.
+func (m *Model) paletteKeys() []string { return colors.OrderOf(m.palette) }
+
+// colorLabel is the display name of a color key.
+func (m *Model) colorLabel(key string) string {
+	if key == "" {
+		return "no color"
+	}
+	return colors.LabelOf(m.palette, key)
+}
+
+// colorRank is a key's position in the display order, or len(keys) when it is
+// unknown (so it sorts last rather than jumping to the front).
+func (m *Model) colorRank(key string) int {
+	for i, k := range m.paletteKeys() {
+		if k == key {
+			return i
+		}
+	}
+	return len(colors.Palette)
 }
 
 // buildRows flattens the cached fleet into display rows, leaving out hosts
@@ -891,6 +1284,19 @@ func (m *Model) applyFilterSort() {
 			rows = append(rows, r)
 		}
 	}
+	// Colors view: the order is manual. Groups follow the palette's display
+	// order; inside a group, sessions you placed by hand come first in that
+	// order, then everything else alphabetically — so a partly-ordered group
+	// still reads predictably. Sorting keys do not apply here.
+	if m.grouped {
+		ord := m.ordMap()
+		rank := m.groupRank()
+		sort.SliceStable(rows, func(i, j int) bool {
+			return m.groupLess(rows[i], rows[j], rank, ord)
+		})
+		m.rows = rows
+		return
+	}
 	less := m.less()
 	if m.desc {
 		sort.SliceStable(rows, func(i, j int) bool { return less(rows[j], rows[i]) })
@@ -898,6 +1304,44 @@ func (m *Model) applyFilterSort() {
 		sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 	}
 	m.rows = rows
+}
+
+// groupLess is the colors-view ordering: groups by the palette's display rank,
+// and inside a group by the manual position, then by name. openGroupCmd uses it
+// too, so the tabs it opens appear in the same order the group is listed —
+// opening a color should read down the list you are looking at.
+func (m Model) groupLess(a, b row, rank, ord map[string]int) bool {
+	ra, okA := rank[a.groupKey()]
+	rb, okB := rank[b.groupKey()]
+	if !okA {
+		ra = len(colors.Palette)
+	}
+	if !okB {
+		rb = len(colors.Palette)
+	}
+	if ra != rb {
+		return ra < rb
+	}
+	oa, ob := ord[a.key()], ord[b.key()]
+	switch {
+	case oa > 0 && ob > 0:
+		return oa < ob
+	case oa > 0:
+		return true
+	case ob > 0:
+		return false
+	}
+	return a.Name < b.Name
+}
+
+// groupRank is the palette display order as a rank map, with anything not in
+// the palette (uncolored included) last.
+func (m Model) groupRank() map[string]int {
+	rank := map[string]int{}
+	for i, k := range m.paletteKeys() {
+		rank[k] = i
+	}
+	return rank
 }
 
 func (m Model) less() func(a, b row) bool {
@@ -925,23 +1369,49 @@ func (m Model) less() func(a, b row) bool {
 		return func(a, b row) bool { return a.Created > b.Created }
 	case 4:
 		return byName
-	default: // color groups in palette order
+	default: // uncolored first, then colors in palette order
 		return func(a, b row) bool {
 			if a.def.Name != b.def.Name {
-				return paletteIndex(a.def.Name) < paletteIndex(b.def.Name)
+				return m.colorRank(a.def.Name) < m.colorRank(b.def.Name)
 			}
 			return byName(a, b)
 		}
 	}
 }
 
-func paletteIndex(name string) int {
-	for i, d := range colors.Palette {
-		if d.Name == name {
-			return i
+// moveGroupTo reorders the palette so `key` sits at display position `to`, and
+// persists the new order. The palette is fleet-wide, so this changes how every
+// dashboard groups colors.
+func (m Model) moveGroupTo(key string, to int) tea.Cmd {
+	keys := m.palKeys()
+	from := -1
+	for i, k := range keys {
+		if k == key {
+			from = i
+			break
 		}
 	}
-	return len(colors.Palette)
+	if from < 0 || to < 0 || to >= len(keys) || to == from {
+		return nil
+	}
+	moved := keys[from]
+	// Remove it, then insert it at the target index.
+	seq := append([]string(nil), keys[:from]...)
+	seq = append(seq, keys[from+1:]...)
+	seq = append(seq[:to], append([]string{moved}, seq[to:]...)...)
+
+	entries := make([]model.PaletteEntry, 0, len(seq))
+	for _, k := range seq {
+		entries = append(entries, model.PaletteEntry{Name: k, Label: colors.LabelOf(m.palette, k)})
+	}
+	return func() tea.Msg {
+		err := client.PutPalette(m.cfg, entries)
+		note := "moved " + m.colorLabel(moved) + " to position " + strconv.Itoa(to+1)
+		if err != nil {
+			note = ""
+		}
+		return actionMsg{err: err, note: note}
+	}
 }
 
 func (m *Model) restoreCursor(key string) {
@@ -1085,36 +1555,47 @@ func (m Model) viewList() string {
 	hdr += pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW"
 	b.WriteString(sHead.Render(hdr) + "\n")
 
-	// ---- group headers (host / color sort) ----
-	// A single-host tab already names the host, so host groups are dropped
-	// there; color groups still help.
+	// ---- group headers ----
+	// The colors view always groups. The flat list only groups for host and
+	// color sort keys — and on a single-host tab the host is already named, so
+	// host groups are dropped there.
 	var groupOf func(row) string
 	var groupHead func(key string, n, fresh int) string
-	switch m.sort {
-	case 1:
-		if !single {
-			groupOf = func(r row) string { return r.Host }
-			groupHead = func(key string, n, fresh int) string {
-				dot := sDim.Render("○")
-				if fresh > 0 {
-					dot = sOK.Render("●")
-				}
-				name := key
-				if m.cfg.IsLocal(key) {
-					name += " (you)"
-				}
-				return sGroup.Render(pad("  "+dot+" ▣ "+name, 28)) +
-					sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
-			}
+	hostHead := func(key string, n, fresh int) string {
+		dot := sDim.Render("○")
+		if fresh > 0 {
+			dot = sOK.Render("●")
 		}
-	case 0:
-		groupOf = func(r row) string { return r.def.Name }
-		groupHead = func(key string, n, _ int) string {
-			d := colors.For("", key)
-			dot := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(d.ANSI))).Render("●")
-			return sGroup.Render(pad("  "+dot+" "+key, 28)) +
-				sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
+		name := key
+		if m.cfg.IsLocal(key) {
+			name += " (you)"
 		}
+		return sGroup.Render(pad("  "+dot+" ▣ "+name, 28)) +
+			sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
+	}
+	colorHead := func(key string, n, _ int) string {
+		d := colors.For("", key)
+		dot := "○"
+		if d.Colored() {
+			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(d.ANSI))).Render("●")
+		}
+		head := sGroup.Render(pad("  "+dot+" "+m.colorLabel(key), 28)) +
+			sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
+		if m.cur >= 0 && m.cur < len(m.rows) && m.rows[m.cur].groupKey() == key {
+			head += sDim.Render("   ·  " + m.groupHint())
+		}
+		return head
+	}
+	switch {
+	case m.grouped:
+		groupOf = func(r row) string { return r.groupKey() }
+		groupHead = colorHead
+	case m.sort == 1 && !single:
+		groupOf = func(r row) string { return r.Host }
+		groupHead = hostHead
+	case m.sort == 0:
+		groupOf = func(r row) string { return r.groupKey() }
+		groupHead = colorHead
 	}
 	groups := map[string][2]int{}
 	if groupOf != nil {
@@ -1125,6 +1606,12 @@ func (m Model) viewList() string {
 				g[1]++
 			}
 			groups[groupOf(r)] = g
+		}
+		// A single group needs no heading — it would just repeat the sort key
+		// above a list that is entirely that one thing. This is what makes the
+		// out-of-the-box state (every session uncolored) read as a plain list.
+		if len(groups) < 2 {
+			groupOf = nil
 		}
 	}
 
@@ -1311,9 +1798,10 @@ func (m Model) footer() string {
 		return sChipKey.Render(" "+m.inputMode+" ") + " " + m.input.View()
 	}
 	caps := [][2]string{
-		{"enter", "attach"}, {"p", "preview"}, {"⇥", "host"}, {"c", "color"}, {"t", "tag"},
-		{"r", "rename"}, {"n", "new"}, {"K", "kill"}, {"/", "filter"},
-		{"1-5", "sort"}, {"S", "rev"}, {"?", "help"}, {"q", "quit"},
+		{"enter", "attach"}, {"p", "preview"}, {"⇥", "host"}, {"V", "view"},
+		{"c", "color"}, {"n", "new"}, {"o", "open group"}, {"t", "tag"},
+		{"r", "rename"}, {"K", "kill"}, {"/", "filter"},
+		{"1-5", "sort"}, {"S", "rev"}, {"P", "colors"}, {"?", "help"}, {"q", "quit"},
 	}
 	var out strings.Builder
 	out.WriteString(" ")
@@ -1364,19 +1852,31 @@ func (m Model) viewHelp() string {
 		"  s              cycle sort        S  reverse        R  force refresh",
 		"  H              show/hide client machines (hidden hosts)",
 		"",
+		head("two views — V switches"),
+		"  colors view    sessions under a heading per color, manual order only.",
+		"                 sorting keys do nothing here; arrange by hand.",
+		"  flat list      one list you can sort (1…5). The color is only the dot",
+		"                 on the left, not a sub-heading.",
+		"",
+		head("working with color groups"),
+		"  c              set the selected session's color (also its tab emoji)",
+		"  n              new session — it starts in the color you are standing on",
+		"  ⇧↑ / ⇧↓        move the session one place inside its group",
+		"  o              open every session in this group as tabs in this tmux",
+		"                 session (dtc's own window plus one per session)",
+		"  P              manage colors: ⇧↑/⇧↓ reorder the groups, r renames one",
+		"",
 		head("actions on the selected session"),
-		"  c              set color (updates the Ghostty tab emoji everywhere)",
 		"  t              set tag (empty clears)      r  rename",
 		"  K              kill session (confirm with y)",
-		"  n              new session on any host",
 		"",
 		head("the dot colors"),
-		"  The dot before each session is its color — one of nine pastels:",
-		"  🔴red 🟠orange 🟡yellow 🟢green 🔷cyan 🔵blue 🟣purple 🌸pink ⚪gray.",
-		"  Until you set one it is picked automatically by hashing the session",
-		"  name, so it is stable but arbitrary. Press c to give it meaning",
-		"  (group your work however you like), then sort with 1 to group by it.",
-		"  The dot also drives the Ghostty tab emoji on the owning host.",
+		"  Nine pastels: 🔴red 🟠orange 🟡yellow 🟢green 🔷cyan 🔵blue 🟣purple",
+		"  🌸pink ⚪gray. Nothing is colored until you say so — a new session is",
+		"  plain, and c gives it meaning. Colors and their group order are fleet",
+		"  state on the hub, so every machine groups them the same way, and a",
+		"  rename never rewrites a session. The dot also drives the Ghostty tab",
+		"  emoji on the owning host.",
 		"",
 		head("the color column values"),
 		sDim.Render("  ACT is colored by freshness: green < 5 min · amber < 1 h ·"),
@@ -1393,22 +1893,43 @@ func (m Model) viewHelp() string {
 }
 
 func (m Model) pickerOverlay() string {
+	if m.palPick {
+		var lines []string
+		keys := m.palKeys()
+		for i, k := range keys {
+			cur := "  "
+			if i == m.palPickCur {
+				cur = "▌ "
+			}
+			d, _ := colors.ByName(k)
+			dot := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(d.ANSI))).Render("●")
+			label := m.colorLabel(k)
+			extra := ""
+			if label != k {
+				extra = sDim.Render("  (" + k + ")")
+			}
+			lines = append(lines, cur+dot+" "+pad(label, 20)+extra)
+		}
+		lines = append(lines, "", sDim.Render("  ⇧↑/⇧↓ move · r rename · esc done"),
+			sDim.Render("  uncolored sessions always sit below the colors"))
+		return overlay("colors — order and names", strings.Join(lines, "\n"))
+	}
 	if m.colorPick {
 		var lines []string
-		for i, d := range colors.Palette {
+		for i, k := range m.pickerColorKeys() {
 			cur := "  "
 			if i == m.colorPickCur {
 				cur = "▌ "
 			}
+			if k == "" {
+				lines = append(lines, cur+"○ no color")
+				continue
+			}
+			d, _ := colors.ByName(k)
 			dot := lipgloss.NewStyle().Foreground(lipgloss.Color(strconv.Itoa(d.ANSI))).Render("●")
-			lines = append(lines, cur+dot+" "+d.Name)
+			lines = append(lines, cur+dot+" "+m.colorLabel(k))
 		}
-		auto := "  ○ auto (from name)"
-		if m.colorPickCur == len(colors.Palette) {
-			auto = "▌ ○ auto (from name)"
-		}
-		lines = append(lines, auto)
-		return overlay("set color — "+m.rows[m.cur].Name, strings.Join(lines, "\n"))
+		return overlay("set color — "+m.rows[m.cur].Name+" (P manages the palette)", strings.Join(lines, "\n"))
 	}
 	if m.hostPick {
 		var lines []string

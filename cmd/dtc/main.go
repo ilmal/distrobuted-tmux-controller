@@ -394,10 +394,14 @@ func cmdKill(args []string) error {
 
 func cmdColor(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: dtc color NAME <color|auto>")
+		return fmt.Errorf("usage: dtc color NAME <color|none>")
 	}
 	name, color := args[0], args[1]
-	if color != "auto" {
+	// "none" clears the color; there is no automatic one to fall back to.
+	if color == "auto" || color == "none" || color == "-" {
+		color = ""
+	}
+	if color != "" {
 		if _, ok := colors.ByName(color); !ok {
 			return fmt.Errorf("unknown color %q (palette: %s)", color, colorNames())
 		}
@@ -433,19 +437,22 @@ func cmdColor(args []string) error {
 		}
 		return nil
 	}
-	if color == "auto" {
+	if color == "" {
 		err = run("set-option", "-u", "-t", name, "@dtc-color")
 	} else {
 		err = run("set-option", "-t", name, "@dtc-color", color)
 	}
 	if err == nil {
-		def := colors.For(name, color)
-		err = run("set-option", "-t", name, "@dtc-title", def.Emoji+" "+name)
+		err = run("set-option", "-t", name, "@dtc-title", colors.For(name, color).Title(name))
 	}
 	if err != nil {
 		return err
 	}
 	kickAgent(cfg, host, alias)
+	if color == "" {
+		fmt.Printf("color of %s: none\n", name)
+		return nil
+	}
 	fmt.Printf("color of %s: %s\n", name, color)
 	return nil
 }

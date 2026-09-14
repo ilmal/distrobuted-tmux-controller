@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ilmal/distrobuted-tmux-controller/internal/colors"
 	"github.com/ilmal/distrobuted-tmux-controller/internal/model"
 )
 
@@ -131,5 +132,253 @@ func TestMetaOnUnknownSession(t *testing.T) {
 	_, st := testServer(t)
 	if err := st.Meta(model.MetaPatch{Host: "cn1", Name: "nope", Color: str("red")}); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// ---- palette and manual ordering ----
+
+func put(t *testing.T, h http.Handler, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestPaletteDefaultsToCanonical(t *testing.T) {
+	s, _ := testServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/palette", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	s.Router().ServeHTTP(rec, req)
+	var p model.Palette
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(p.Colors) != 9 {
+		t.Fatalf("default palette has %d colors, want 9", len(p.Colors))
+	}
+	if p.Colors[0].Name != "red" || p.Colors[0].Label != "red" {
+		t.Fatalf("unexpected first entry: %+v", p.Colors[0])
+	}
+}
+
+func TestPaletteRenameAndReorderRoundTrip(t *testing.T) {
+	s, st := testServer(t)
+	// Move green to the front and rename it.
+	entries := []model.PaletteEntry{{Name: "green", Label: "  wip  "}}
+	for _, e := range []string{"red", "orange", "yellow", "cyan", "blue", "purple", "pink", "gray"} {
+		entries = append(entries, model.PaletteEntry{Name: e, Label: e})
+	}
+	body, _ := json.Marshal(model.Palette{Colors: entries})
+	rec := put(t, s.Router(), "/api/v1/palette", string(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put palette got %d: %s", rec.Code, rec.Body.String())
+	}
+	got := st.Palette()
+	if got[0].Name != "green" || got[0].Label != "wip" {
+		t.Fatalf("palette not stored: %+v", got[0])
+	}
+	// Order is display order, so the reorder survives a restart of the reader.
+	if order := orderOf(got); order[0] != "green" {
+		t.Fatalf("display order = %v, want green first", order)
+	}
+}
+
+func orderOf(p []model.PaletteEntry) []string {
+	out := make([]string, 0, len(p))
+	for _, e := range p {
+		out = append(out, e.Name)
+	}
+	return out
+}
+
+// reversePalette is the canonical palette back to front, a valid payload that
+// is obviously not the default.
+func reversePalette() []model.PaletteEntry {
+	def := colors.DefaultPalette()
+	out := make([]model.PaletteEntry, 0, len(def))
+	for i := len(def) - 1; i >= 0; i-- {
+		out = append(out, def[i])
+	}
+	return out
+}
+
+func TestPaletteRejectsIncompletePayload(t *testing.T) {
+	s, st := testServer(t)
+	rec := put(t, s.Router(), "/api/v1/palette", `{"colors":[{"name":"red","label":"red"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a partial palette got %d, want 400", rec.Code)
+	}
+	if len(st.Palette()) != 9 {
+		t.Fatal("a rejected palette must not change the stored one")
+	}
+}
+
+func TestPaletteRejectsUnknownColor(t *testing.T) {
+	s, _ := testServer(t)
+	var entries []model.PaletteEntry
+	for _, n := range []string{"red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink", "chartreuse"} {
+		entries = append(entries, model.PaletteEntry{Name: n, Label: n})
+	}
+	body, _ := json.Marshal(model.Palette{Colors: entries})
+	rec := put(t, s.Router(), "/api/v1/palette", string(body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown color key got %d, want 400", rec.Code)
+	}
+}
+
+func TestGroupOrderRoundTrip(t *testing.T) {
+	s, st := testServer(t)
+	st.Heartbeat(beat("cn1", false, "alpha", "beta", "gamma"))
+	for _, n := range []string{"alpha", "beta", "gamma"} {
+		if err := st.Meta(model.MetaPatch{Host: "cn1", Name: n, Color: str("green")}); err != nil {
+			t.Fatalf("meta %s: %v", n, err)
+		}
+	}
+	body, _ := json.Marshal(model.GroupOrder{Group: "green", Items: []model.OrderedItem{
+		{Host: "cn1", Name: "gamma"},
+		{Host: "cn1", Name: "alpha"},
+	}})
+	if rec := put(t, s.Router(), "/api/v1/order", string(body)); rec.Code != http.StatusOK {
+		t.Fatalf("put order got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Fleet() resolves each session's manual position.
+	hb := st.Fleet()[0]
+	pos := map[string]int{}
+	for _, sess := range hb.Sessions {
+		pos[sess.Name] = sess.Ord
+	}
+	if pos["gamma"] != 1 || pos["alpha"] != 2 {
+		t.Fatalf("manual positions = %v, want gamma=1 alpha=2", pos)
+	}
+	if pos["beta"] != 0 {
+		t.Fatalf("unplaced session should have Ord 0, got %d", pos["beta"])
+	}
+}
+
+func TestGroupOrderDropsUnknownAndMisplacedSessions(t *testing.T) {
+	s, st := testServer(t)
+	st.Heartbeat(beat("cn1", false, "alpha", "mover"))
+	if err := st.Meta(model.MetaPatch{Host: "cn1", Name: "alpha", Color: str("green")}); err != nil {
+		t.Fatalf("meta: %v", err)
+	}
+	// "mover" is uncolored, so it does not belong in the green group.
+	body, _ := json.Marshal(model.GroupOrder{Group: "green", Items: []model.OrderedItem{
+		{Host: "cn1", Name: "alpha"},
+		{Host: "cn1", Name: "mover"},
+		{Host: "cn1", Name: "ghost"},
+		{Host: "", Name: "nameless"},
+	}})
+	put(t, s.Router(), "/api/v1/order", string(body))
+	items := st.GroupOrder("green")
+	if len(items) != 1 || items[0].Name != "alpha" {
+		t.Fatalf("stale or misplaced order entries were kept: %+v", items)
+	}
+}
+
+// A session that leaves its group must not keep a position in the old one.
+func TestColorChangeDropsOldGroupPosition(t *testing.T) {
+	_, st := testServer(t)
+	st.Heartbeat(beat("cn1", false, "alpha", "beta"))
+	st.Meta(model.MetaPatch{Host: "cn1", Name: "alpha", Color: str("green")})
+	st.SetGroupOrder("green", []model.OrderedItem{{Host: "cn1", Name: "alpha"}})
+	if len(st.GroupOrder("green")) != 1 {
+		t.Fatal("order was not stored")
+	}
+	if err := st.Meta(model.MetaPatch{Host: "cn1", Name: "alpha", Color: str("blue")}); err != nil {
+		t.Fatalf("meta: %v", err)
+	}
+	if got := st.GroupOrder("green"); len(got) != 0 {
+		t.Fatalf("recolored session kept its old group slot: %+v", got)
+	}
+}
+
+// A heartbeat that no longer reports a session prunes its manual position.
+func TestHeartbeatPrunesOrderForDeadSession(t *testing.T) {
+	_, st := testServer(t)
+	st.Heartbeat(beat("main", false, "gamma"))
+	st.Meta(model.MetaPatch{Host: "main", Name: "gamma", Color: str("green")})
+	st.SetGroupOrder("green", []model.OrderedItem{{Host: "main", Name: "gamma"}})
+
+	st.Heartbeat(beat("cn1", false, "alpha", "beta"))
+	for _, n := range []string{"alpha", "beta"} {
+		st.Meta(model.MetaPatch{Host: "cn1", Name: n, Color: str("green")})
+	}
+	st.SetGroupOrder("green", []model.OrderedItem{
+		{Host: "cn1", Name: "alpha"},
+		{Host: "cn1", Name: "beta"},
+		{Host: "main", Name: "gamma"},
+	})
+
+	// cn1 drops beta: its slot goes, cn1's other slot and main's stay.
+	st.Heartbeat(beat("cn1", false, "alpha"))
+	items := st.GroupOrder("green")
+	if len(items) != 2 || items[0].Name != "alpha" || items[1].Name != "gamma" {
+		t.Fatalf("pruning removed the wrong slots: %+v", items)
+	}
+}
+
+// The sessions endpoint carries the palette and the order, so a dashboard needs
+// only one fetch to render the fleet exactly as every other dashboard does.
+func TestSessionsCarriesPaletteAndOrder(t *testing.T) {
+	s, st := testServer(t)
+	st.Heartbeat(beat("cn1", false, "alpha"))
+	st.Meta(model.MetaPatch{Host: "cn1", Name: "alpha", Color: str("green")})
+	st.SetGroupOrder("green", []model.OrderedItem{{Host: "cn1", Name: "alpha"}})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	s.Router().ServeHTTP(rec, req)
+	var resp model.FleetResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(resp.Colors) != 9 {
+		t.Fatalf("fleet response carried %d colors, want 9", len(resp.Colors))
+	}
+	if len(resp.Order) != 1 || resp.Order[0].Group != "green" {
+		t.Fatalf("fleet response lost the group order: %+v", resp.Order)
+	}
+}
+
+func TestOrdersAreInPaletteDisplayOrder(t *testing.T) {
+	_, st := testServer(t)
+	st.Heartbeat(beat("cn1", false, "a", "b", "c"))
+	st.Meta(model.MetaPatch{Host: "cn1", Name: "a", Color: str("blue")})
+	st.Meta(model.MetaPatch{Host: "cn1", Name: "b", Color: str("red")})
+	st.SetGroupOrder("blue", []model.OrderedItem{{Host: "cn1", Name: "a"}})
+	st.SetGroupOrder("red", []model.OrderedItem{{Host: "cn1", Name: "b"}})
+	st.SetGroupOrder("", []model.OrderedItem{{Host: "cn1", Name: "c"}})
+	got := st.Orders()
+	want := []string{"red", "blue", ""} // palette order, uncolored last
+	if len(got) != len(want) {
+		t.Fatalf("got %d groups, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Group != want[i] {
+			t.Fatalf("group %d = %q, want %q", i, got[i].Group, want[i])
+		}
+	}
+}
+
+func TestPaletteSurvivesReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fleet.json")
+	st, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if _, err := st.SetPalette(reversePalette()); err != nil {
+		t.Fatalf("set palette: %v", err)
+	}
+	again, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if again.Palette()[0].Name != "gray" {
+		t.Fatalf("palette order lost across reload: %+v", again.Palette()[0])
 	}
 }

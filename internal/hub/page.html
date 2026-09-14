@@ -20,6 +20,9 @@
   td.name { font-weight:600; }
   td.prev { white-space:normal; color:#8b93a3; max-width:520px; overflow:hidden; text-overflow:ellipsis; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
+  /* An uncolored session draws as a hollow ring: a color is something you
+     assign, so "none" has to be visibly different from a real color. */
+  .dot.none { background:transparent !important; box-shadow:inset 0 0 0 1.5px #6a6a6a; }
   .stale { background:#555 !important; }
   .hidden-note { background:#171a21; border:1px solid #232833; border-radius:8px;
                  padding:8px 12px; margin-bottom:16px; color:#7a8190; }
@@ -42,7 +45,7 @@
     <tr><th></th><th>session</th><th>att</th><th>act</th><th>tag</th><th>preview</th></tr>
     {{range .Sessions}}
     <tr>
-      <td><span class="dot" style="background:{{.Dot}}"></span></td>
+      <td><span class="dot{{if .Dot}}{{else}} none{{end}}" style="background:{{.Dot}}"></span></td>
       <td class="name">{{.Name}}</td>
       <td>{{if .Attached}}<span class="attd">✓</span>{{else}}–{{end}}</td>
       <td>{{.Act}}</td>

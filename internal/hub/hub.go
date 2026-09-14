@@ -35,6 +35,9 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("POST /api/v1/heartbeat", s.auth(http.HandlerFunc(s.heartbeat)))
 	mux.Handle("GET /api/v1/sessions", s.auth(http.HandlerFunc(s.sessions)))
 	mux.Handle("PATCH /api/v1/meta", s.auth(http.HandlerFunc(s.meta)))
+	mux.Handle("GET /api/v1/palette", s.auth(http.HandlerFunc(s.getPalette)))
+	mux.Handle("PUT /api/v1/palette", s.auth(http.HandlerFunc(s.putPalette)))
+	mux.Handle("PUT /api/v1/order", s.auth(http.HandlerFunc(s.putOrder)))
 	return mux
 }
 
@@ -89,7 +92,41 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, model.FleetResponse{Now: time.Now(), Host: s.Store.Fleet()})
+	writeJSON(w, http.StatusOK, model.FleetResponse{
+		Now:    time.Now(),
+		Host:   s.Store.Fleet(),
+		Order:  s.Store.Orders(),
+		Colors: s.Store.Palette(),
+	})
+}
+
+func (s *Server) getPalette(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, model.Palette{Colors: s.Store.Palette()})
+}
+
+func (s *Server) putPalette(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var p model.Palette
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, "bad palette", http.StatusBadRequest)
+		return
+	}
+	saved, err := s.Store.SetPalette(p.Colors)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.Palette{Colors: saved})
+}
+
+func (s *Server) putOrder(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	var o model.GroupOrder
+	if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+		http.Error(w, "bad order", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.GroupOrder{Group: o.Group, Items: s.Store.SetGroupOrder(o.Group, o.Items)})
 }
 
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) {

@@ -17,8 +17,9 @@ type HostCfg struct {
 	// alias or user@host). Empty means "this machine, run tmux locally".
 	SSH string `toml:"ssh"`
 	// Hidden marks a client machine (e.g. a laptop): its sessions are left out
-	// of fleet views. The local machine is never hidden from itself, and
-	// dashboards can reveal hidden hosts on demand (TUI `H`, `ls --all`).
+	// of fleet views. This includes the machine's own view of itself — a
+	// client's sessions are scratch terminal windows — and dashboards can
+	// reveal hidden hosts on demand (TUI `H`, `ls --all`, hub `?all=1`).
 	Hidden bool `toml:"hidden"`
 }
 
