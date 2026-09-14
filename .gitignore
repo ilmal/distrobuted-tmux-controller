@@ -7,6 +7,7 @@ token
 # build artifacts
 /dtc
 /dtc-hub
+/deploy/dtc
 dist/
 
 # runtime state
