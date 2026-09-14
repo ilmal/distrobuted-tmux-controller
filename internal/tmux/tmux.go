@@ -44,7 +44,7 @@ func run(args ...string) (string, error) {
 // List returns raw session metadata for the local server (no previews).
 func List() ([]model.Session, error) {
 	out, err := run("list-sessions", "-F", strings.Join([]string{
-		"#{session_name}", "#{session_windows}", "#{session_attached}",
+		"#{session_name}", "#{session_attached}",
 		"#{session_created}", "#{session_activity}",
 		"#{@dtc-color}", "#{@dtc-tag}", "#{@dtc-title}",
 	}, sep))
@@ -60,23 +60,21 @@ func List() ([]model.Session, error) {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, sep, 8)
-		if len(f) < 8 {
+		f := strings.SplitN(line, sep, 7)
+		if len(f) < 7 {
 			continue
 		}
-		var ws, created, act int64
-		fmt.Sscanf(f[1], "%d", &ws)
-		fmt.Sscanf(f[3], "%d", &created)
-		fmt.Sscanf(f[4], "%d", &act)
+		var created, act int64
+		fmt.Sscanf(f[2], "%d", &created)
+		fmt.Sscanf(f[3], "%d", &act)
 		sessions = append(sessions, model.Session{
 			Name:     f[0],
-			Windows:  int(ws),
-			Attached: f[2] == "1",
+			Attached: f[1] == "1",
 			Created:  created,
 			Activity: act,
-			Color:    f[5],
-			Tag:      f[6],
-			Title:    f[7],
+			Color:    f[4],
+			Tag:      f[5],
+			Title:    f[6],
 		})
 	}
 	return sessions, nil

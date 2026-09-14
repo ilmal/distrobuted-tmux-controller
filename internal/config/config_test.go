@@ -20,8 +20,8 @@ func TestHiddenHost(t *testing.T) {
 		{"main", false, false},
 		{"laptop", false, true},   // local config says so
 		{"other", true, true},     // its own heartbeat says so
-		{"cn1", false, false},     // never hidden from itself
-		{"cn1", true, false},      // ...not even if it self-declares
+		{"cn1", false, false},     // the local machine with no flag stays visible
+		{"cn1", true, true},       // a client machine hides itself too
 		{"unknown", true, true},   // a self-declared unknown host is still hidden
 		{"unknown", false, false}, // ...but an unknown host with no flag is not
 	}

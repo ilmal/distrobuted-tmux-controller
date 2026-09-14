@@ -39,12 +39,11 @@
       <small>· tmux {{.TmuxVersion}} · seen {{.Seen}} ago{{if .Stale}} · STALE{{end}}{{if .Hidden}} · client{{end}}</small></h2>
   {{if .Sessions}}
   <table>
-    <tr><th></th><th>session</th><th>win</th><th>att</th><th>act</th><th>tag</th><th>preview</th></tr>
+    <tr><th></th><th>session</th><th>att</th><th>act</th><th>tag</th><th>preview</th></tr>
     {{range .Sessions}}
     <tr>
       <td><span class="dot" style="background:{{.Dot}}"></span></td>
       <td class="name">{{.Name}}</td>
-      <td>{{.Windows}}</td>
       <td>{{if .Attached}}<span class="attd">✓</span>{{else}}–{{end}}</td>
       <td>{{.Act}}</td>
       <td>{{.Tag}}</td>

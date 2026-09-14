@@ -139,7 +139,7 @@ func actStyle(d time.Duration) lipgloss.Style {
 }
 
 // list column widths (sessions table)
-const colName, colHost, colWin, colAtt, colAct, colTag = 26, 14, 3, 4, 5, 12
+const colName, colHost, colAtt, colAct, colTag = 26, 14, 4, 5, 12
 
 func keycap(k, label string) string {
 	kc := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("249")).Bold(true).Render(" " + k + " ")
@@ -1076,13 +1076,13 @@ func (m Model) viewList() string {
 	if single {
 		hostW = 0
 	}
-	used := 1 + colName + hostW + colWin + colAtt + colAct + colTag + 1
+	used := 1 + colName + hostW + colAtt + colAct + colTag + 1
 	prevW := max(0, m.width-used)
 	hdr := " " + pad("", 1) + pad("SESSION", colName)
 	if !single {
 		hdr += pad("HOST", colHost)
 	}
-	hdr += pad("W", colWin) + pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW"
+	hdr += pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW"
 	b.WriteString(sHead.Render(hdr) + "\n")
 
 	// ---- group headers (host / color sort) ----
@@ -1289,7 +1289,6 @@ func (m Model) renderRow(r row, sel bool, prevW int, single bool) string {
 	if !single {
 		host = cell(lipgloss.NewStyle(), r.Host, colHost)
 	}
-	win := cell(lipgloss.NewStyle(), strconv.Itoa(r.Windows), colWin)
 	att := cell(lipgloss.NewStyle(), "·", colAtt)
 	if r.Attached {
 		att = cell(sAttached, "✓", colAtt)
@@ -1297,7 +1296,7 @@ func (m Model) renderRow(r row, sel bool, prevW int, single bool) string {
 	act := cell(actStyle(time.Since(time.Unix(r.Activity, 0))), rel(time.Since(time.Unix(r.Activity, 0))), colAct)
 	tag := cell(lipgloss.NewStyle(), r.Tag, colTag)
 	prev := cell(sDim, strings.ReplaceAll(r.Preview, "\n", " "), prevW)
-	return gutter + dot + name + host + win + att + act + tag + prev
+	return gutter + dot + name + host + att + act + tag + prev
 }
 
 func (m Model) footer() string {
@@ -1372,7 +1371,8 @@ func (m Model) viewHelp() string {
 		"  n              new session on any host",
 		"",
 		head("the dot colors"),
-		"  The dot before each session is its color — one of nine pastels.",
+		"  The dot before each session is its color — one of nine pastels:",
+		"  🔴red 🟠orange 🟡yellow 🟢green 🔷cyan 🔵blue 🟣purple 🌸pink ⚪gray.",
 		"  Until you set one it is picked automatically by hashing the session",
 		"  name, so it is stable but arbitrary. Press c to give it meaning",
 		"  (group your work however you like), then sort with 1 to group by it.",

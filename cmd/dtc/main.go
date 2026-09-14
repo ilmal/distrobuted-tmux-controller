@@ -178,7 +178,7 @@ func cmdLs(args []string) error {
 	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 
 	now := time.Now()
-	fmt.Printf("%-2s %-24s %-14s %3s %-3s %-5s %-12s %s\n", "", "SESSION", "HOST", "W", "ATT", "ACT", "TAG", "PREVIEW")
+	fmt.Printf("%-2s %-24s %-14s %-3s %-5s %-12s %s\n", "", "SESSION", "HOST", "ATT", "ACT", "TAG", "PREVIEW")
 	for _, rw := range rows {
 		dot := "\x1b[38;5;" + strconv.Itoa(rw.def.ANSI) + "m●\x1b[0m"
 		att := "·"
@@ -186,8 +186,8 @@ func cmdLs(args []string) error {
 			att = "\x1b[32m✓\x1b[0m"
 		}
 		prev := strings.ReplaceAll(rw.Preview, "\n", " ")
-		fmt.Printf("%-2s %-24s %-14s %3d %-3s %-5s %-12s %s\n",
-			dot, trunc(rw.Name, 24), trunc(rw.Host, 14), rw.Windows, att, rel(now.Sub(time.Unix(rw.Activity, 0))), trunc(rw.Tag, 12), prev)
+		fmt.Printf("%-2s %-24s %-14s %-3s %-5s %-12s %s\n",
+			dot, trunc(rw.Name, 24), trunc(rw.Host, 14), att, rel(now.Sub(time.Unix(rw.Activity, 0))), trunc(rw.Tag, 12), prev)
 	}
 	fmt.Printf("\n%d sessions on %d hosts · hub %s\n", len(rows), shownHosts, cfg.HubURL)
 	if hidden > 0 && !all {

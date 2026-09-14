@@ -64,18 +64,28 @@ func TestRevealShowsClientMachine(t *testing.T) {
 	}
 }
 
-func TestLocalMachineNeverHiddenFromItself(t *testing.T) {
-	// Even if this machine's own table says hidden, it must still see itself.
+func TestClientMachineHidesFromItself(t *testing.T) {
+	// A client machine's own sessions are scratch terminal windows; hiding the
+	// host means hiding them on the client too, not only on the servers.
 	cfg := &config.Config{
-		Hostname: "cn1",
-		Hosts:    map[string]config.HostCfg{"cn1": {Hidden: true}},
+		Hostname: "laptop",
+		Hosts:    map[string]config.HostCfg{"laptop": {Hidden: true}},
 	}
 	m := &Model{cfg: cfg, confirmRow: -1}
-	m.fleet = []model.Host{{Name: "cn1", LastSeen: time.Now(), Hidden: true,
-		Sessions: []model.Session{{Name: "mine", Host: "cn1"}}}}
+	m.fleet = []model.Host{{Name: "laptop", LastSeen: time.Now(), Hidden: true,
+		Sessions: []model.Session{{Name: "ghostty-1", Host: "laptop"}}}}
+	m.buildRows()
+	if m.totalAll != 0 {
+		t.Fatalf("client machine still listed its own sessions: visible=%d", m.totalAll)
+	}
+	if m.hiddenCnt != 1 {
+		t.Fatalf("expected the hidden count to include itself, got %d", m.hiddenCnt)
+	}
+	// ...but it is always one keypress away.
+	m.showHidden = true
 	m.buildRows()
 	if m.totalAll != 1 {
-		t.Fatalf("local machine hid itself: visible=%d", m.totalAll)
+		t.Fatalf("reveal should bring the client's own sessions back, got %d", m.totalAll)
 	}
 }
 
@@ -197,6 +207,22 @@ func TestSingleHostTabDropsHostColumn(t *testing.T) {
 	for _, line := range splitLines(view) {
 		if containsStr(line, "SESSION") && containsStr(line, "HOST") {
 			t.Fatal("single-host tab still renders the HOST column")
+		}
+	}
+}
+
+func TestNoWindowColumn(t *testing.T) {
+	m := testModel()
+	m.width, m.height = 140, 40
+	for _, tab := range []string{allTab, "cn1"} {
+		m.setTab(tab)
+		for _, line := range splitLines(m.viewList()) {
+			// The header and the rows must not carry a window count. "W" as a
+			// standalone header cell is what we removed; the substring check
+			// is scoped to the header line to avoid matching session names.
+			if containsStr(line, "ATT") && containsStr(line, "W ") {
+				t.Fatalf("window column still in the header: %q", line)
+			}
 		}
 	}
 }

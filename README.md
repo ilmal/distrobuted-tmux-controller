@@ -1,14 +1,14 @@
 # dtc — distributed tmux controller
 
 One dashboard for every tmux session across a Tailscale fleet. Sessions on any
-machine show up everywhere: name, host, window count, attached state, activity,
-a live preview snippet, a color, a tag.
+machine show up everywhere: name, host, attached state, activity, a live
+preview snippet, a color, a tag.
 
 ```
 🧭 dtc — tmux fleet  · hub ok · refreshed now ago
-34 sessions (34 shown) · 5 attached · sort: color
-●  SESSION                HOST         W  ATT  ACT   TAG         PREVIEW
-🔵 k8s                    cn1          1    ·  2h                ...
+34 sessions · 5 attached · sort: color
+●  SESSION                HOST          ATT  ACT   TAG         PREVIEW
+🔵 k8s                    cn1            ·  2h                ...
 ```
 
 ## Architecture
@@ -89,8 +89,10 @@ the TUI, `ls`, name resolution, and the hub's web page, with a
 `(+N hidden — dtc ls --all)` note so nothing is silently lost. A machine can
 also declare *itself* hidden: the agent sends that flag in every heartbeat, so
 every dashboard agrees without repeating the setting in each machine's config.
-The local machine is never hidden from itself; reveal with `H` (TUI),
-`--all` (ls), or `?all=1` (hub page) any time.
+This covers the client machine's **own** view as well — its scratch windows are
+the noise the flag exists to remove, and showing them only on the machine you
+are least likely to be reading the fleet from is the least useful case. Reveal
+with `H` (TUI), `--all` (ls), or `?all=1` (hub page) any time.
 
 Host and color sorts render grouped section headers with per-group counts;
 activity freshness is color-coded (green < 5 min, amber < 1 h, dim older).
@@ -128,13 +130,10 @@ as the default color-sort group order.
 ### Reading a row
 
 ```
-●  SESSION     HOST   W  ATT  ACT   TAG    PREVIEW
-🔵 k8s         cn1    1   ·   2h    infra  kubectl get pods
+●  SESSION     HOST   ATT  ACT   TAG    PREVIEW
+🔵 k8s         cn1     ·   2h    infra  kubectl get pods
 ```
 
-- **`W`** — the session's **window count** in tmux. This fleet keeps one window
-  per session, so it reads `1` almost everywhere; it is there for the session
-  that grows a second window.
 - **`ATT`** — whether a client is currently attached.
 - **`ACT`** — time since the last activity, colored by freshness (green
   < 5 min, amber < 1 h, gray < 24 h, dim older). This is the row's *only*

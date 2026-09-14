@@ -24,7 +24,7 @@ func testServer(t *testing.T) (*Server, *Store) {
 func beat(host string, hidden bool, names ...string) model.Heartbeat {
 	hb := model.Heartbeat{Host: host, TmuxVersion: "3.4", Hidden: hidden}
 	for _, n := range names {
-		hb.Sessions = append(hb.Sessions, model.Session{Name: n, Activity: time.Now().Unix(), Windows: 1})
+		hb.Sessions = append(hb.Sessions, model.Session{Name: n, Activity: time.Now().Unix()})
 	}
 	return hb
 }

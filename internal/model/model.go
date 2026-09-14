@@ -10,7 +10,6 @@ const PinDuration = 90 * time.Second
 type Session struct {
 	Name     string `json:"name"`
 	Host     string `json:"host"`
-	Windows  int    `json:"windows"`
 	Attached bool   `json:"attached"`
 	Created  int64  `json:"created"`
 	Activity int64  `json:"activity"`
