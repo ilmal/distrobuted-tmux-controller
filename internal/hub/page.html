@@ -21,6 +21,10 @@
   td.prev { white-space:normal; color:#8b93a3; max-width:520px; overflow:hidden; text-overflow:ellipsis; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
   .stale { background:#555 !important; }
+  .hidden-note { background:#171a21; border:1px solid #232833; border-radius:8px;
+                 padding:8px 12px; margin-bottom:16px; color:#7a8190; }
+  .hidden-note a { color:#afd7ff; }
+  a { color:#afd7ff; }
   .attd { color:#87d787; }
   footer { color:#5b6270; margin-top:24px; font-size:12px; }
 </style>
@@ -28,10 +32,11 @@
 <body>
 <h1>🧭 dtc — tmux fleet</h1>
 <div class="sub">{{.Total}} sessions · {{.Attached}} attached · {{len .Hosts}} hosts · refreshed {{.Now}}</div>
+{{if .Hidden}}<div class="hidden-note">{{.Hidden}} sessions on {{.HiddenHost}} client {{if eq .HiddenHost 1}}machine{{else}}machines{{end}} {{if .ShowAll}}shown — normally hidden{{else}}hidden{{end}} — <a href="{{if .ShowAll}}/{{else}}/?all=1{{end}}">{{if .ShowAll}}hide again{{else}}show all{{end}}</a></div>{{end}}
 {{range .Hosts}}
 <div class="host">
-  <h2><span class="dot{{if .Stale}} stale{{end}}" style="background:#87d787"></span> {{.Name}}
-      <small>· tmux {{.TmuxVersion}} · seen {{.Seen}} ago{{if .Stale}} · STALE{{end}}</small></h2>
+  <h2><span class="dot{{if .Stale}} stale{{end}}" style="background:{{if .Hidden}}#8a8a8a{{else}}#87d787{{end}}"></span> {{.Name}}
+      <small>· tmux {{.TmuxVersion}} · seen {{.Seen}} ago{{if .Stale}} · STALE{{end}}{{if .Hidden}} · client{{end}}</small></h2>
   {{if .Sessions}}
   <table>
     <tr><th></th><th>session</th><th>win</th><th>att</th><th>act</th><th>tag</th><th>preview</th></tr>

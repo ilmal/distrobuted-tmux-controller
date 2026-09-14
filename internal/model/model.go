@@ -29,7 +29,11 @@ type Host struct {
 	TmuxVersion string    `json:"tmux_version,omitempty"`
 	OS          string    `json:"os,omitempty"`
 	Arch        string    `json:"arch,omitempty"`
-	Sessions    []Session `json:"sessions"`
+	// Hidden is the host's own declaration that it is a client machine, sent in
+	// its heartbeat. The hub honours it so every dashboard agrees without
+	// duplicating the setting; the machine itself is never hidden from itself.
+	Hidden   bool      `json:"hidden,omitempty"`
+	Sessions []Session `json:"sessions"`
 }
 
 func (h *Host) Stale() bool { return time.Since(h.LastSeen) > 3*time.Minute }
@@ -39,6 +43,7 @@ type Heartbeat struct {
 	TmuxVersion string    `json:"tmux_version,omitempty"`
 	OS          string    `json:"os,omitempty"`
 	Arch        string    `json:"arch,omitempty"`
+	Hidden      bool      `json:"hidden,omitempty"`
 	Sessions    []Session `json:"sessions"`
 }
 

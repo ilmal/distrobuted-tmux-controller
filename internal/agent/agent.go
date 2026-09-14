@@ -33,6 +33,7 @@ func beat(cfg *config.Config) error {
 		OS:          runtime.GOOS,
 		Arch:        runtime.GOARCH,
 		TmuxVersion: tmux.Version(),
+		Hidden:      cfg.SelfHidden(),
 		Sessions:    tmux.HeartbeatSessions(),
 	}
 	return client.PostHeartbeat(cfg, hb)

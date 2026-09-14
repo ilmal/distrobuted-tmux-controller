@@ -32,9 +32,14 @@ type row struct {
 func (r row) key() string { return r.Host + "\x1f" + r.Name }
 
 type Model struct {
-	cfg  *config.Config
-	rows []row
-	cur  int
+	cfg *config.Config
+
+	// allRows is every visible session (hidden hosts already excluded); rows is
+	// that list after the open tab and the filter are applied. Keeping them
+	// separate lets the tab and filter re-scope without losing the rest.
+	allRows []row
+	rows    []row
+	cur     int
 
 	fleet      []model.Host // raw last-fetched fleet, incl. hidden hosts
 	showHidden bool
@@ -44,6 +49,11 @@ type Model struct {
 	desc     bool
 	filter   string
 	totalAll int
+
+	// tabHost is the host whose tab is open; "" means the "all" tab. On a
+	// single host the HOST column is dropped so the session name and preview
+	// get the extra width.
+	tabHost string
 
 	view  int // 0 list, 1 preview, 2 help
 	vp    viewport.Model
@@ -133,7 +143,7 @@ const colName, colHost, colWin, colAtt, colAct, colTag = 26, 14, 3, 4, 5, 12
 
 func keycap(k, label string) string {
 	kc := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("249")).Bold(true).Render(" " + k + " ")
-	return kc + sDim.Render(" " + label + " ")
+	return kc + sDim.Render(" "+label+" ")
 }
 
 // ---- construction ----
@@ -288,6 +298,7 @@ func (m Model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc:
 			if m.inputMode == "filter" {
 				m.filter = ""
+				m.applyFilterSort()
 			}
 			m.inputMode = ""
 			m.input.Blur()
@@ -302,6 +313,7 @@ func (m Model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch mode {
 			case "filter":
 				m.filter = val
+				m.applyFilterSort()
 				m.cur = 0
 				return m, nil
 			case "rename":
@@ -514,12 +526,27 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 	case "s":
 		m.sort = (m.sort + 1) % 5
+		m.applyFilterSort()
 		m.cur = 0
 	case "S":
 		m.desc = !m.desc
+		m.applyFilterSort()
 	case "1", "2", "3", "4", "5":
 		m.sort = int(key.String()[0] - '1')
+		m.applyFilterSort()
 		m.cur = 0
+	case "tab", "]":
+		m.cycleTab(1)
+	case "shift+tab", "[":
+		m.cycleTab(-1)
+	case "0":
+		m.setTab(allTab)
+	case "6", "7", "8", "9":
+		// Jump straight to a host tab: all = 0, hosts = 6…9 in tab order.
+		hosts := m.visibleHosts()
+		if i := int(key.String()[0] - '6'); i < len(hosts) {
+			m.setTab(hosts[i])
+		}
 	case "H":
 		m.showHidden = !m.showHidden
 		prevKey := ""
@@ -754,12 +781,13 @@ func (m *Model) loadFleet(fr *model.FleetResponse) {
 }
 
 // buildRows flattens the cached fleet into display rows, leaving out hosts
-// marked hidden (config `hidden = true`) unless reveal is on.
+// marked hidden — either in this machine's config or by the host itself
+// (heartbeat `hidden`) — unless reveal is on.
 func (m *Model) buildRows() {
 	var rows []row
 	m.hiddenCnt = 0
 	for _, h := range m.fleet {
-		if m.cfg.IsHidden(h.Name) {
+		if m.cfg.HiddenHost(h.Name, h.Hidden) {
 			m.hiddenCnt += len(h.Sessions)
 			if !m.showHidden {
 				continue
@@ -769,15 +797,93 @@ func (m *Model) buildRows() {
 			rows = append(rows, row{Session: s, def: colors.For(s.Name, s.Color), stale: h.Stale()})
 		}
 	}
-	m.rows = rows
+	m.allRows = rows
 	m.totalAll = len(rows)
+	// A tab pointing at a host that is no longer visible falls back to "all".
+	if m.tabHost != "" && m.tabHost != allTab && !m.tabVisible(m.tabHost) {
+		m.tabHost = allTab
+	}
+	m.applyFilterSort()
+}
+
+const allTab = ""
+
+// visibleHosts lists the hosts that are currently in view (hidden ones left
+// out unless revealed), in tab order: local machine first, then alphabetical.
+func (m *Model) visibleHosts() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, h := range m.fleet {
+		if m.cfg.HiddenHost(h.Name, h.Hidden) && !m.showHidden {
+			continue
+		}
+		if !seen[h.Name] {
+			seen[h.Name] = true
+			out = append(out, h.Name)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		li, lj := m.cfg.IsLocal(out[i]), m.cfg.IsLocal(out[j])
+		if li != lj {
+			return li
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+func (m *Model) tabVisible(host string) bool {
+	for _, h := range m.visibleHosts() {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// tabCounts is how many sessions each tab holds: the "all" tab plus one entry
+// per host, counted over everything in view (independent of the filter, so the
+// tab labels stay stable while you type).
+func (m *Model) tabCounts() (all int, perHost map[string]int) {
+	perHost = map[string]int{}
+	for _, h := range m.fleet {
+		if m.cfg.HiddenHost(h.Name, h.Hidden) && !m.showHidden {
+			continue
+		}
+		perHost[h.Name] += len(h.Sessions)
+		all += len(h.Sessions)
+	}
+	return all, perHost
+}
+
+// cycleTab moves the open tab by delta (wrapping through "all").
+func (m *Model) cycleTab(delta int) {
+	tabs := append([]string{allTab}, m.visibleHosts()...)
+	cur := 0
+	for i, t := range tabs {
+		if t == m.tabHost {
+			cur = i
+			break
+		}
+	}
+	cur = (cur + delta + len(tabs)) % len(tabs)
+	m.setTab(tabs[cur])
+}
+
+// setTab opens a host tab ("" = all) and re-scopes the visible rows.
+func (m *Model) setTab(host string) {
+	m.tabHost = host
+	m.cur = 0
 	m.applyFilterSort()
 }
 
 func (m *Model) applyFilterSort() {
 	f := strings.ToLower(m.filter)
 	var rows []row
-	for _, r := range m.rows {
+	for _, r := range m.allRows {
+		if m.tabHost != allTab && r.Host != m.tabHost {
+			continue
+		}
 		if f == "" ||
 			strings.Contains(strings.ToLower(r.Name), f) ||
 			strings.Contains(strings.ToLower(r.Host), f) ||
@@ -938,25 +1044,19 @@ func (m Model) viewList() string {
 			age = sDim.Render("  refreshed " + rel(d) + " ago")
 		}
 	}
-	attached := 0
-	hostsFresh := map[string]bool{}
-	for _, r := range m.rows {
-		if r.Attached {
-			attached++
-		}
-		if !r.stale {
-			hostsFresh[r.Host] = true
-		}
-	}
+	sessions, attached, hostsTotal, hostsFresh := m.tabScope()
 	b.WriteString(sTitle.Render("🧭 dtc") + sDim.Render(" distributed tmux controller  ") + hub + age + "\n")
 
 	ctx := sDim.Render("sort ") + sHead.Render(m.sortLabel()) +
-		sDim.Render(fmt.Sprintf("  ·  %d sessions", m.totalAll))
+		sDim.Render(fmt.Sprintf("  ·  %d sessions", sessions))
+	if m.tabHost != allTab {
+		ctx += sDim.Render(" on ") + sHead.Render(m.tabHost)
+	}
 	if attached > 0 {
 		ctx += sDim.Render("  ·  ") + sAttached.Render(fmt.Sprintf("%d attached", attached))
 	}
-	if len(hostsFresh) > 0 {
-		ctx += sDim.Render(fmt.Sprintf("  ·  %d/%d hosts up", len(hostsFresh), m.hostCount()))
+	if hostsTotal > 0 {
+		ctx += sDim.Render(fmt.Sprintf("  ·  %d/%d hosts up", hostsFresh, hostsTotal))
 	}
 	if m.hiddenCnt > 0 && !m.showHidden {
 		ctx += sDim.Render(fmt.Sprintf("  ·  %d hidden (H shows them)", m.hiddenCnt))
@@ -965,31 +1065,47 @@ func (m Model) viewList() string {
 		ctx += sDim.Render("  ·  filter ") + sOK.Render("/"+m.filter+"/")
 	}
 	b.WriteString(ctx + "\n")
+	b.WriteString(m.tabBar() + "\n")
 	b.WriteString(sRule.Render(strings.Repeat("─", max(20, m.width-1))) + "\n")
 
 	// ---- column header ----
-	used := 1 + colName + colHost + colWin + colAtt + colAct + colTag + 1
+	// On a single-host tab the HOST column is dropped and its width goes to
+	// the preview, so each row carries more content.
+	single := m.tabHost != allTab
+	hostW := colHost
+	if single {
+		hostW = 0
+	}
+	used := 1 + colName + hostW + colWin + colAtt + colAct + colTag + 1
 	prevW := max(0, m.width-used)
-	b.WriteString(sHead.Render(" " + pad("", 1) + pad("SESSION", colName) + pad("HOST", colHost) +
-		pad("W", colWin) + pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW") + "\n")
+	hdr := " " + pad("", 1) + pad("SESSION", colName)
+	if !single {
+		hdr += pad("HOST", colHost)
+	}
+	hdr += pad("W", colWin) + pad("ATT", colAtt) + pad("ACT", colAct) + pad("TAG", colTag) + "PREVIEW"
+	b.WriteString(sHead.Render(hdr) + "\n")
 
 	// ---- group headers (host / color sort) ----
+	// A single-host tab already names the host, so host groups are dropped
+	// there; color groups still help.
 	var groupOf func(row) string
 	var groupHead func(key string, n, fresh int) string
 	switch m.sort {
 	case 1:
-		groupOf = func(r row) string { return r.Host }
-		groupHead = func(key string, n, fresh int) string {
-			dot := sDim.Render("○")
-			if fresh > 0 {
-				dot = sOK.Render("●")
+		if !single {
+			groupOf = func(r row) string { return r.Host }
+			groupHead = func(key string, n, fresh int) string {
+				dot := sDim.Render("○")
+				if fresh > 0 {
+					dot = sOK.Render("●")
+				}
+				name := key
+				if m.cfg.IsLocal(key) {
+					name += " (you)"
+				}
+				return sGroup.Render(pad("  "+dot+" ▣ "+name, 28)) +
+					sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
 			}
-			name := key
-			if m.cfg.IsLocal(key) {
-				name += " (you)"
-			}
-			return sGroup.Render(pad("  "+dot+" ▣ "+name, 28)) +
-				sDim.Render(fmt.Sprintf("%d session%s", n, plural(n)))
 		}
 	case 0:
 		groupOf = func(r row) string { return r.def.Name }
@@ -1028,7 +1144,7 @@ func (m Model) viewList() string {
 		if i == m.cur {
 			selLine = len(lines)
 		}
-		lines = append(lines, m.renderRow(r, i == m.cur, prevW))
+		lines = append(lines, m.renderRow(r, i == m.cur, prevW, single))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, sDim.Render("  no sessions"+filterHint(m.filter)))
@@ -1070,17 +1186,83 @@ func plural(n int) string {
 	return "s"
 }
 
-func (m Model) hostCount() int {
-	set := map[string]bool{}
-	for _, r := range m.rows {
-		set[r.Host] = true
+// tabBar renders the host tabs: one per machine plus an "all" tab, with the
+// per-tab session counts. The open tab is boxed; the local machine is marked.
+func (m Model) tabBar() string {
+	all, per := m.tabCounts()
+	sTabOn := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("153")).Bold(true).Padding(0, 1)
+	sTabOff := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236")).Padding(0, 1)
+	sTabMe := lipgloss.NewStyle().Foreground(lipgloss.Color("110")).Background(lipgloss.Color("236")).Padding(0, 1)
+	sTabMeOn := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("157")).Bold(true).Padding(0, 1)
+
+	var b strings.Builder
+	b.WriteString(" ")
+	add := func(st lipgloss.Style, label string) {
+		b.WriteString(st.Render(label))
+		b.WriteString(" ")
 	}
-	return len(set)
+	if m.tabHost == allTab {
+		add(sTabOn, fmt.Sprintf("all %d", all))
+	} else {
+		add(sTabOff, fmt.Sprintf("all %d", all))
+	}
+	for _, h := range m.visibleHosts() {
+		label := fmt.Sprintf("%s %d", h, per[h])
+		me := m.cfg.IsLocal(h)
+		if h == m.tabHost {
+			if me {
+				add(sTabMeOn, label)
+			} else {
+				add(sTabOn, label)
+			}
+		} else {
+			if me {
+				add(sTabMe, label)
+			} else {
+				add(sTabOff, label)
+			}
+		}
+	}
+	if m.showHidden {
+		add(sDim, "· hidden shown")
+	}
+	return b.String()
+}
+
+// tabScope reports the session count, attached count and fresh-host count for
+// the open tab, ignoring the filter. The stats line describes the tab you are
+// looking at; the filter indicator is reported separately, so a narrowed view
+// never looks like a smaller fleet.
+func (m *Model) tabScope() (sessions, attached, hostsTotal, hostsFresh int) {
+	inTab := map[string]bool{}
+	for _, h := range m.fleet {
+		if m.cfg.HiddenHost(h.Name, h.Hidden) && !m.showHidden {
+			continue
+		}
+		if m.tabHost != allTab && h.Name != m.tabHost {
+			continue
+		}
+		inTab[h.Name] = true
+		sessions += len(h.Sessions)
+		for _, s := range h.Sessions {
+			if s.Attached {
+				attached++
+			}
+		}
+	}
+	hostsTotal = len(inTab)
+	fresh := map[string]bool{}
+	for _, r := range m.allRows {
+		if inTab[r.Host] && !r.stale {
+			fresh[r.Host] = true
+		}
+	}
+	return sessions, attached, hostsTotal, len(fresh)
 }
 
 // renderRow renders one session row; when selected every cell gets the
 // selection background so the highlight spans the full line width.
-func (m Model) renderRow(r row, sel bool, prevW int) string {
+func (m Model) renderRow(r row, sel bool, prevW int, single bool) string {
 	dimBase := lipgloss.NewStyle()
 	if r.stale {
 		dimBase = sDim
@@ -1103,7 +1285,10 @@ func (m Model) renderRow(r row, sel bool, prevW int) string {
 	}
 	dot := dotSt.Render("●")
 	name := cell(lipgloss.NewStyle(), r.Name, colName)
-	host := cell(lipgloss.NewStyle(), r.Host, colHost)
+	host := ""
+	if !single {
+		host = cell(lipgloss.NewStyle(), r.Host, colHost)
+	}
 	win := cell(lipgloss.NewStyle(), strconv.Itoa(r.Windows), colWin)
 	att := cell(lipgloss.NewStyle(), "·", colAtt)
 	if r.Attached {
@@ -1127,7 +1312,7 @@ func (m Model) footer() string {
 		return sChipKey.Render(" "+m.inputMode+" ") + " " + m.input.View()
 	}
 	caps := [][2]string{
-		{"enter", "attach"}, {"p", "preview"}, {"c", "color"}, {"t", "tag"},
+		{"enter", "attach"}, {"p", "preview"}, {"⇥", "host"}, {"c", "color"}, {"t", "tag"},
 		{"r", "rename"}, {"n", "new"}, {"K", "kill"}, {"/", "filter"},
 		{"1-5", "sort"}, {"S", "rev"}, {"?", "help"}, {"q", "quit"},
 	}
@@ -1172,17 +1357,30 @@ func (m Model) viewHelp() string {
 		"  enter          attach (local, or ssh to the owning host)",
 		"",
 		head("view"),
+		"  ⇥ / ⇧⇥         next / previous host tab (0 = all hosts)",
+		"  6…9            jump straight to a host tab (6 = first host)",
 		"  p              live pane preview (last 3000 lines)",
 		"  /              filter by name/host/tag (esc clears)",
 		"  1…5            sort: 1 color · 2 host · 3 activity · 4 created · 5 name",
 		"  s              cycle sort        S  reverse        R  force refresh",
-		"  H              show/hide hosts marked hidden in config (client machines)",
+		"  H              show/hide client machines (hidden hosts)",
 		"",
 		head("actions on the selected session"),
 		"  c              set color (updates the Ghostty tab emoji everywhere)",
 		"  t              set tag (empty clears)      r  rename",
 		"  K              kill session (confirm with y)",
 		"  n              new session on any host",
+		"",
+		head("the dot colors"),
+		"  The dot before each session is its color — one of nine pastels.",
+		"  Until you set one it is picked automatically by hashing the session",
+		"  name, so it is stable but arbitrary. Press c to give it meaning",
+		"  (group your work however you like), then sort with 1 to group by it.",
+		"  The dot also drives the Ghostty tab emoji on the owning host.",
+		"",
+		head("the color column values"),
+		sDim.Render("  ACT is colored by freshness: green < 5 min · amber < 1 h ·"),
+		sDim.Render("  gray < 1 day · dim older. It colors the age, not the session."),
 		"",
 		head("misc"),
 		"  ?              this help       q  quit",

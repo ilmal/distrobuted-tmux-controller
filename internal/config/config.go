@@ -111,8 +111,23 @@ func (c *Config) IsLocal(host string) bool {
 	return host == c.Hostname
 }
 
-// IsHidden reports whether a fleet host is marked as a client machine and
-// should stay out of fleet views. The machine you run on is never hidden.
-func (c *Config) IsHidden(host string) bool {
-	return host != c.Hostname && c.Hosts[host].Hidden
+// HiddenHost reports whether a fleet host should stay out of fleet views.
+// `selfDeclared` is the host's own `hidden` flag as reported by the hub (it
+// marks itself a client machine), which lets every dashboard agree without
+// repeating the setting in each machine's config. The machine you run on is
+// never hidden from itself.
+func (c *Config) HiddenHost(host string, selfDeclared bool) bool {
+	return host != c.Hostname && (selfDeclared || c.Hosts[host].Hidden)
+}
+
+// IsHidden is HiddenHost using only the local config (no heartbeat flag).
+func (c *Config) IsHidden(host string) bool { return c.HiddenHost(host, false) }
+
+// SelfHidden reports whether this machine declares itself a client machine
+// (its own [hosts.<self>] table carries hidden = true). The agent sends this
+// in every heartbeat so the hub — and therefore every dashboard, including
+// the hub's web page — can leave it out of fleet views without each machine
+// repeating the setting.
+func (c *Config) SelfHidden() bool {
+	return c.Hosts[c.Hostname].Hidden
 }

@@ -171,7 +171,9 @@ func cmdLs(args []string) error {
 			}
 			return len(colors.Palette)
 		}
-		less = func(a, b r) bool { return pi(a.def.Name) < pi(b.def.Name) || a.def.Name == b.def.Name && a.Name < b.Name }
+		less = func(a, b r) bool {
+			return pi(a.def.Name) < pi(b.def.Name) || a.def.Name == b.def.Name && a.Name < b.Name
+		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 

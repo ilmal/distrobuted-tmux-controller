@@ -11,17 +11,19 @@ type Def struct {
 	Emoji string
 }
 
-// Palette order doubles as the default "color sort" group order.
+// Palette order doubles as the default "color sort" group order. Colors are
+// deliberately pastel (soft, low-saturation ANSI 256 tones) so a full column
+// of dots stays calm on a dark terminal.
 var Palette = []Def{
-	{"red", 203, "#ff5f5f", "🔴"},
-	{"orange", 208, "#ff8700", "🟠"},
-	{"yellow", 220, "#ffd700", "🟡"},
-	{"green", 114, "#87d787", "🟢"},
-	{"cyan", 80, "#5fd7d7", "🔷"},
-	{"blue", 75, "#5fafff", "🔵"},
-	{"purple", 141, "#af87ff", "🟣"},
+	{"red", 217, "#ffafaf", "🔴"},
+	{"orange", 216, "#ffaf87", "🟠"},
+	{"yellow", 222, "#ffd787", "🟡"},
+	{"green", 157, "#afffaf", "🟢"},
+	{"cyan", 159, "#afffff", "🔷"},
+	{"blue", 153, "#afd7ff", "🔵"},
+	{"purple", 183, "#d7afff", "🟣"},
 	{"pink", 218, "#ffafd7", "🌸"},
-	{"gray", 245, "#8a8a8a", "⚪"},
+	{"gray", 250, "#bcbcbc", "⚪"},
 }
 
 func ByName(name string) (Def, bool) {

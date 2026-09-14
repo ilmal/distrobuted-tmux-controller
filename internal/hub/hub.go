@@ -122,10 +122,13 @@ type pageHost struct {
 }
 
 type pageData struct {
-	Hosts    []pageHost
-	Total    int
-	Attached int
-	Now      string
+	Hosts      []pageHost
+	Total      int
+	Attached   int
+	Now        string
+	Hidden     int  // sessions on client machines left out of this view
+	HiddenHost int  // the machines themselves
+	ShowAll    bool // ?all=1 revealed them
 }
 
 func rel(d time.Duration) string {
@@ -147,9 +150,21 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	showAll := r.URL.Query().Get("all") != ""
 	now := time.Now()
-	data := pageData{Now: now.Format("15:04:05")}
+	data := pageData{Now: now.Format("15:04:05"), ShowAll: showAll}
 	for _, h := range s.Store.Fleet() {
+		// A machine that declares itself a client (heartbeat Hidden) stays out
+		// of the fleet view unless explicitly revealed with ?all=1. Its sessions
+		// are counted either way so the note stays visible after a reveal, which
+		// is the only way back to the hidden view.
+		if h.Hidden {
+			data.Hidden += len(h.Sessions)
+			data.HiddenHost++
+			if !showAll {
+				continue
+			}
+		}
 		ph := pageHost{Host: h, Seen: rel(now.Sub(h.LastSeen)), Stale: h.Stale()}
 		for _, sess := range h.Sessions {
 			ps := pageSession{Session: sess,

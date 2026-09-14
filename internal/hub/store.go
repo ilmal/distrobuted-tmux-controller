@@ -66,6 +66,7 @@ func (s *Store) Heartbeat(hb model.Heartbeat) {
 		s.Hosts[hb.Host] = h
 	}
 	h.LastSeen, h.TmuxVersion, h.OS, h.Arch = now, hb.TmuxVersion, hb.OS, hb.Arch
+	h.Hidden = hb.Hidden
 
 	seen := map[string]bool{}
 	for _, sess := range hb.Sessions {
