@@ -46,6 +46,15 @@ func recorded(t *testing.T, log string) string {
 	return string(b)
 }
 
+// sized gives the model a real terminal size, so the viewport actually renders
+// (a zero-height viewport returns an empty string, which would make every
+// preview assertion vacuous).
+func sized(m *Model) *Model {
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	out := next.(Model)
+	return &out
+}
+
 // testModel builds a Model with a canned fleet: a local machine (cn1), another
 // server (main), and a client machine (laptop) that declares itself hidden.
 func testModel() *Model {
@@ -577,5 +586,123 @@ func TestOpenGroupFollowsTheManualGroupOrder(t *testing.T) {
 	}
 	if betaAt > alphaAt {
 		t.Errorf("windows opened in hub order, not the listed order:\n%s", got)
+	}
+}
+
+// The preview must appear the moment the key lands, not after a capture
+// round-trip — a remote capture can block for an 8s ssh timeout. Opening shows
+// the heartbeat snippet (or a cached capture) synchronously, and the live
+// capture only ever replaces it.
+func TestPreviewOpensInstantlyFromCachedContent(t *testing.T) {
+	m := sized(testModel())
+	m.cap = map[string]string{}
+
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	got := m2.(Model)
+	if got.view != 1 {
+		t.Fatalf("right arrow left the list (view=%d), want the preview", got.view)
+	}
+	if cmd == nil {
+		t.Fatal("opening the preview started no live capture")
+	}
+	if body := got.vp.View(); strings.TrimSpace(body) == "" {
+		t.Error("preview opened empty, so nothing is on screen until the capture returns")
+	}
+	// A second open must not be a downgrade: the full capture is what shows.
+	got.cap[got.vpRow.key()] = "FULL CAPTURE LINE"
+	left, _ := got.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	got2 := left.(Model)
+	if got2.view != 0 {
+		t.Fatalf("left arrow did not return to the list (view=%d)", got2.view)
+	}
+	got3, _ := got2.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if body := got3.(Model).vp.View(); !strings.Contains(body, "FULL CAPTURE LINE") {
+		t.Errorf("re-opening did not use the cached capture, got %q", body)
+	}
+}
+
+// p and esc still work, left arrow is new, and no other key may close it.
+func TestPreviewClosesOnLeftEscP(t *testing.T) {
+	for _, k := range []tea.KeyMsg{
+		{Type: tea.KeyLeft}, {Type: tea.KeyEsc}, {Type: tea.KeyRunes, Runes: []rune("p")},
+	} {
+		m := sized(testModel())
+		m.cap = map[string]string{}
+		opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		closed, _ := opened.(Model).Update(k)
+		if got := closed.(Model).view; got != 0 {
+			t.Errorf("%q did not close the preview (view=%d)", k.String(), got)
+		}
+	}
+	m := sized(testModel())
+	m.cap = map[string]string{}
+	opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	scrolled, _ := opened.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if got := scrolled.(Model).view; got != 1 {
+		t.Errorf("j closed the preview (view=%d) — it must scroll", got)
+	}
+}
+
+// The live capture arrives after the cached frame is already on screen. Landing
+// at the newest line is the whole point of the preview, so the reader must stay
+// at the bottom across the swap.
+func TestLiveCaptureKeepsTheReaderAtTheBottom(t *testing.T) {
+	m := sized(testModel())
+	m.cap = map[string]string{}
+	opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	got := opened.(Model)
+	if !got.vp.AtBottom() {
+		t.Fatal("preview did not open at the bottom")
+	}
+	long := strings.Repeat("line\n", 500)
+	swapped, _ := got.Update(previewMsg{key: got.vpRow.key(), content: long})
+	got = swapped.(Model)
+	if !got.vp.AtBottom() {
+		t.Error("the live capture scrolled the reader away from the newest line")
+	}
+	if got.cap[got.vpRow.key()] != long {
+		t.Error("the capture was not cached, so re-opening would be a downgrade")
+	}
+}
+
+// A capture that fails after the cached frame is showing must not yank the user
+// back to the list they did not ask to leave.
+func TestFailedLiveCaptureKeepsTheCachedFrame(t *testing.T) {
+	m := sized(testModel())
+	m.cap = map[string]string{}
+	opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	got := opened.(Model)
+	after, _ := got.Update(previewMsg{key: got.vpRow.key(), err: os.ErrDeadlineExceeded})
+	got = after.(Model)
+	if got.view != 1 {
+		t.Errorf("a failed capture dropped out of the preview (view=%d)", got.view)
+	}
+	if got.vp.View() == "" {
+		t.Error("the cached frame was cleared by a failed capture")
+	}
+}
+
+// The cache is keyed by session and pruned to the live fleet, so it cannot grow
+// without bound over a long uptime.
+func TestCapturesPruneToTheLiveFleet(t *testing.T) {
+	m := testModel()
+	m.cap = map[string]string{"cn1\x1falpha": "x", "gone\x1fvanish": "y"}
+	m.buildRows()
+	if _, ok := m.cap["gone\x1fvanish"]; ok {
+		t.Error("a capture for a session no longer in the fleet was kept")
+	}
+	if _, ok := m.cap["cn1\x1falpha"]; !ok {
+		t.Error("a capture for a live session was pruned")
+	}
+}
+
+// An empty snippet must still say something rather than render a blank preview.
+func TestPreviewSnippetIsNeverBlank(t *testing.T) {
+	if got := previewSnippet("   "); strings.TrimSpace(got) == "" {
+		t.Error("an empty snippet rendered blank, so the preview would look broken")
+	}
+	got := previewSnippet("one ⏎ two")
+	if !strings.Contains(got, "one") || !strings.Contains(got, "two") || strings.Contains(got, "⏎") {
+		t.Errorf("snippet not split into lines: %q", got)
 	}
 }

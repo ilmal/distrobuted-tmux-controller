@@ -72,6 +72,11 @@ type Model struct {
 	vp    viewport.Model
 	vpRow row
 
+	// cap is the last full capture per session key, so re-opening a preview
+	// shows the whole thing at once instead of the heartbeat snippet while the
+	// capture runs again. Bounded, and only ever read on open.
+	cap map[string]string
+
 	hubOK   bool
 	hubErr  string
 	fetched time.Time
@@ -116,7 +121,10 @@ type attachedMsg struct{ err error }
 
 type previewMsg struct {
 	content string
-	err     error
+	// key is the session key this capture belongs to, so the result can be
+	// cached and shown instantly the next time that session is previewed.
+	key string
+	err error
 }
 
 type actionMsg struct {
@@ -183,6 +191,7 @@ func New(cfg *config.Config) Model {
 		confirmRow: -1,
 		grouped:    true, // colors view is the default; V gives the flat sortable list
 		palette:    colors.DefaultPalette(),
+		cap:        map[string]string{},
 	}
 }
 
@@ -270,13 +279,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case previewMsg:
 		if msg.err != nil {
+			// A live capture can fail (a remote host gone away) after the cached
+			// frame has already been shown. Stay on it rather than dropping the
+			// user back to the list they were not asking to return to.
+			if m.view == 1 {
+				m.setErr("preview: " + msg.err.Error())
+				return m, nil
+			}
 			m.setErr("preview: " + msg.err.Error())
 			m.view = 0
 			return m, nil
 		}
+		if msg.key != "" {
+			if m.cap == nil {
+				m.cap = map[string]string{}
+			}
+			m.cap[msg.key] = msg.content
+		}
+		if m.view != 1 {
+			// The preview was closed while the capture ran; cache it for next
+			// time without reopening a view the user left.
+			return m, nil
+		}
+		// Keep the reader where they are. The preview opened from cache and this
+		// is the live capture arriving a moment later: SetContent alone pins the
+		// reader to the same line number, but a preview is read from the bottom
+		// up, so staying at the bottom is what "not moving" means here.
+		wasBottom := m.vp.AtBottom()
+		offset := m.vp.YOffset
 		m.vp.SetContent(msg.content)
-		m.vp.GotoTop()
-		m.view = 1
+		if wasBottom {
+			m.vp.GotoBottom()
+		} else {
+			m.vp.SetYOffset(offset)
+		}
 		return m, nil
 
 	case actionMsg:
@@ -544,7 +580,7 @@ func (m Model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updatePreview(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
-		case "esc", "q", "p":
+		case "esc", "q", "p", "left":
 			m.view = 0
 			return m, nil
 		}
@@ -600,9 +636,23 @@ func (m Model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.rows) > 0 {
 			return m, m.attachCmd(m.rows[m.cur])
 		}
-	case "p":
+	case "p", "right":
 		if len(m.rows) > 0 {
 			m.vpRow = m.rows[m.cur]
+			// Something is on screen the instant the key lands, then a live
+			// capture swaps in. Prefer this session's last capture — the whole
+			// pane, so re-opening is not a downgrade — and fall back to the
+			// heartbeat snippet, which is at worst seconds old because the list
+			// is polled every 5s. Either way nothing waits on a round-trip that
+			// can take an 8s ssh timeout for a remote session.
+			if prev, ok := m.cap[m.vpRow.key()]; ok {
+				m.vp.SetContent(prev)
+			} else {
+				m.vp.SetContent(previewSnippet(m.vpRow.Preview))
+			}
+			m.vp.GotoBottom()
+			m.view = 1
+			m.clearErr()
 			return m, previewCmd(m.cfg, m.rows[m.cur])
 		}
 	case "c":
@@ -815,6 +865,17 @@ func (m Model) attachCmd(r row) tea.Cmd {
 	return tea.ExecProcess(cmd, func(err error) tea.Msg { return attachedMsg{err} })
 }
 
+// previewSnippet renders the heartbeat's cached snippet as the first thing the
+// preview shows. It is wrapped rather than left on one line: the snippet joins
+// its captured lines with a separator, and a preview pane is wider than it is
+// useful to have one very long line in.
+func previewSnippet(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return sDim.Render("(no cached snippet yet — the live capture is on its way)")
+	}
+	return strings.ReplaceAll(s, " ⏎ ", "\n")
+}
+
 func previewCmd(cfg *config.Config, r row) tea.Cmd {
 	return func() tea.Msg {
 		var out []byte
@@ -824,7 +885,7 @@ func previewCmd(cfg *config.Config, r row) tea.Cmd {
 		} else {
 			alias, ok := cfg.SSHFor(r.Host)
 			if !ok || alias == "" {
-				return previewMsg{err: fmt.Errorf("no ssh route for %q", r.Host)}
+				return previewMsg{key: r.key(), err: fmt.Errorf("no ssh route for %q", r.Host)}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -833,9 +894,9 @@ func previewCmd(cfg *config.Config, r row) tea.Cmd {
 			out, err = cmd.Output()
 		}
 		if err != nil {
-			return previewMsg{err: err}
+			return previewMsg{key: r.key(), err: err}
 		}
-		return previewMsg{content: tmux.Sanitize(string(out))}
+		return previewMsg{key: r.key(), content: tmux.Sanitize(string(out))}
 	}
 }
 
@@ -1192,11 +1253,31 @@ func (m *Model) buildRows() {
 	}
 	m.allRows = rows
 	m.totalAll = len(rows)
+	m.pruneCaptures()
 	// A tab pointing at a host that is no longer visible falls back to "all".
 	if m.tabHost != "" && m.tabHost != allTab && !m.tabVisible(m.tabHost) {
 		m.tabHost = allTab
 	}
 	m.applyFilterSort()
+}
+
+// pruneCaptures drops cached previews for sessions that are gone, so a long
+// uptime cannot accumulate a capture per session ever seen.
+func (m *Model) pruneCaptures() {
+	if len(m.cap) == 0 {
+		return
+	}
+	live := make(map[string]bool, len(m.fleet))
+	for _, h := range m.fleet {
+		for _, s := range h.Sessions {
+			live[h.Name+"\x1f"+s.Name] = true
+		}
+	}
+	for k := range m.cap {
+		if !live[k] {
+			delete(m.cap, k)
+		}
+	}
 }
 
 const allTab = ""
@@ -1517,8 +1598,16 @@ func (m Model) viewList() string {
 	sessions, attached, hostsTotal, hostsFresh := m.tabScope()
 	b.WriteString(sTitle.Render("🧭 dtc") + sDim.Render(" distributed tmux controller  ") + hub + age + "\n")
 
-	ctx := sDim.Render("sort ") + sHead.Render(m.sortLabel()) +
-		sDim.Render(fmt.Sprintf("  ·  %d sessions", sessions))
+	// The header states the mode, not just the sort. In the colors view the
+	// sort keys are inert, so naming a sort there would describe something the
+	// user cannot see — and with every session uncolored (the default) the two
+	// views list the same rows in the same places, so this line is what says
+	// which one you are in.
+	ctx := sDim.Render("colors view · manual order") + sHead.Render("")
+	if !m.grouped {
+		ctx = sDim.Render("sort ") + sHead.Render(m.sortLabel())
+	}
+	ctx += sDim.Render(fmt.Sprintf("  ·  %d sessions", sessions))
 	if m.tabHost != allTab {
 		ctx += sDim.Render(" on ") + sHead.Render(m.tabHost)
 	}
@@ -1810,7 +1899,7 @@ func (m Model) footer() string {
 		return sChipKey.Render(" "+m.inputMode+" ") + " " + m.input.View()
 	}
 	caps := [][2]string{
-		{"enter", "attach"}, {"p", "preview"}, {"⇥", "host"}, {"V", "view"},
+		{"enter", "attach"}, {"→", "preview"}, {"⇥", "host"}, {"V", "view"},
 		{"c", "color"}, {"n", "new"}, {"o", "open group"}, {"t", "tag"},
 		{"r", "rename"}, {"K", "kill"}, {"/", "filter"},
 		{"1-5", "sort"}, {"S", "rev"}, {"P", "colors"}, {"?", "help"}, {"q", "quit"},
@@ -1837,11 +1926,23 @@ func filterHint(f string) string {
 func (m Model) viewPreview() string {
 	title := sBar.Render("📄 "+m.vpRow.Name) +
 		sDim.Render("  @ "+m.vpRow.Host+" · last activity "+rel(time.Since(time.Unix(m.vpRow.Activity, 0)))+" ago") +
-		sDim.Render("  ·  esc close · j/k scroll")
+		sDim.Render("  ·  ← back · j/k scroll")
 	body := title + "\n\n" + m.vp.View() + "\n" + sDim.Render("scroll: j/k/up/down/pgup/pgdn")
+	// A live capture can fail (a remote host gone away, an ssh timeout) after
+	// the cached frame is already up. Say so: the alternative is a stale pane
+	// that looks like the session's real state.
+	if m.err != "" {
+		body += "\n" + sErr.Render("✗ "+trunc(m.err, max(20, m.width-4)))
+	}
+	// The border wears the session's color, or the accent when it has none:
+	// uncolored carries ANSI -1, which is not a valid SGR parameter.
+	border := accent
+	if m.vpRow.def.Colored() {
+		border = lipgloss.Color(strconv.Itoa(m.vpRow.def.ANSI))
+	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(strconv.Itoa(m.vpRow.def.ANSI))).
+		BorderForeground(border).
 		Padding(0, 1).
 		Render(body)
 }
@@ -1858,7 +1959,8 @@ func (m Model) viewHelp() string {
 		head("view"),
 		"  ⇥ / ⇧⇥         next / previous host tab (0 = all hosts)",
 		"  6…9            jump straight to a host tab (6 = first host)",
-		"  p              live pane preview (last 3000 lines)",
+		"  →              live pane preview (last 3000 lines), opens at the newest",
+		"                 line — ← goes back to the list (p and esc work too)",
 		"  /              filter by name/host/tag (esc clears)",
 		"  1…5            sort: 1 color · 2 host · 3 activity · 4 created · 5 name",
 		"  s              cycle sort        S  reverse        R  force refresh",
